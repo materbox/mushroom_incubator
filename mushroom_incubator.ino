@@ -1,7 +1,8 @@
 /************* Includes *************/
 #include <FS.h>
 #include <WiFiManager.h> // https://github.com/tzapu/WiFiManager
-#include <time.h>
+//#include <time.h>
+#include <TimeLib.h>
 #include <TimeAlarms.h>  // 
 #include <stdio.h>
 #include <LittleFS.h>             //https://github.com/esp8266/Arduino/tree/master/libraries/LittleFS
@@ -20,7 +21,7 @@ const int TIME_TO_SEND_TELEMETRY  = 30; //every x seconds to send tellemetry
 #define ESP_DRD_USE_LITTLEFS      true
 #define ESP_DRD_USE_SPIFFS        false
 #define ESP_DRD_USE_EEPROM        false
-#define ESP8266_DRD_USE_RTC       false      
+#define ESP8266_DRD_USE_RTC       false
 #define DOUBLERESETDETECTOR_DEBUG true  //false
 #include <ESP_DoubleResetDetector.h>    //https://github.com/khoih-prog/ESP_DoubleResetDetector
 #define DRD_TIMEOUT 5 // Number of seconds after reset during which a subseqent reset will be considered a double reset.
@@ -48,6 +49,7 @@ constexpr const char RPC_SWITCH_METHOD[] = "example_set_switch";
 constexpr const char RPC_TEMPERATURE_KEY[] = "temp";
 constexpr const char RPC_SWITCH_KEY[] PROGMEM = "switch";
 constexpr const char RPC_RESPONSE_KEY[] = "example_response";
+constexpr char RPC_REQUEST_CALLBACK_METHOD_NAME[] = "getCurrentTime";
 
 
 WiFiClient espClient;
@@ -66,13 +68,27 @@ bool TEST_CP         = false; // always start the configportal, even if ap found
 int  TESP_CP_TIMEOUT = 180; // test cp timeout
 bool TEST_NET        = true; // do a network test after connect, (gets ntp time)
 bool ALLOWONDEMAND   = false; // enable on demand
-int  ONDDEMANDPIN    = 0; // gpio for button
 bool WMISBLOCKING    = true; // use blocking or non blocking mode, non global params wont work in non blocking
 bool STAND_ALONE     = false; // use device without thingsboard server
 bool RESET_SETTINGS  = false; //reset WIFI settings - for testing
 bool WM_CONNECTED    = false;
 bool DRD_DETECTED    = false;
 /************* End Wifi Manager *************/
+
+/************* Lights control *************/
+//Time Alarms
+bool SET_TIME   = true;
+bool SET_ALARMS = true;
+
+//Lights on time
+char lOnHour[]   = "6";
+char lOnMin[]    = "0";
+char lOnSec[]    = "0";
+//Lights off time
+char lOffHour[]  = "14";
+char lOffMin[]   = "0";
+char lOffSec[]   = "0";
+/************* End Lights control *************/
 
 /************* Sensor BH1750 *************/
 #include <Wire.h>
@@ -88,17 +104,9 @@ bool BH1750_DETECTED = false;
 #define SEALEVELPRESSURE_HPA (1013.25)
 Adafruit_BME280 bme; // I2C
 bool BME280_DETECTED = false;
-
-struct bme280 {
-          float tempMean; //Final mean value for temperature
-          float humidityMean; //Final mean value for temperature
-          float pressureMean; //Final mean value for temperature
-        } bme280Data;
-
 float tempBuff; //Buffer for the raw temperature taken by the sensor
 float humidityBuff; //Buffer for the raw humidity taken by the sensor
 float pressureBuff; //Buffer for the raw pressure taken by the sensor
-
 float allTemp; //The sum of all the temperatures taken by the sensor
 float allHumidity; //The sum of all the humidity taken by the sensor
 float allPressure; //The sum of all the pressure taken by the sensor
@@ -118,19 +126,27 @@ bool MQ_DETECTED = false;
 
 //Declare Sensor
 MQUnifiedsensor MQ135(BOARD, VOLTAGE_RESOLUTION, ADC_BIT_RESOLUTION, MQ_ANALOG_PIN, MQ_TYPE);
-
-struct mq {
-          float co; //
-          float co2; //
-          float alcohol; //
-          float toluen;
-          float nh4;
-          float aceton;
-        } mqData;
 /************* End Sensor MQ-series *************/
 
 // Statuses for subscribing to rpc
 bool subscribed = false;
+
+/// @brief Processes function for RPC response of "getCurrentTime".
+/// If no response is set the callback is called with {"error": "timeout"}, after a few seconds
+/// @param data Data containing the rpc response that was sent by the cloud
+void processTime(const JsonVariantConst &data) {
+  time_t time = data["time"];
+  Serial.print("Time: ");
+  Serial.println(time);
+  // Time Alarms
+  setTime (time);
+  // (hour(24 format),minutes,seconds,month,day,year) set time to Saturday 8:29:00am Jan 1 2024
+  //setTime(timeinfo.tm_hour,timeinfo.tm_min,timeinfo.tm_sec,timeinfo.tm_mon,timeinfo.tm_mday,timeinfo.tm_year + 1900);
+  SET_TIME = false;
+  if(SET_ALARMS){
+    setTimeAlarms();
+  }
+}
 
 /// @brief Processes function for RPC call "example_set_temperature"
 /// RPC_Data is a JSON variant, that can be queried using operator[]
@@ -171,6 +187,19 @@ RPC_Response processSwitchChange(const RPC_Data &data) {
   return RPC_Response(doc);
 }
 
+void processClientAttributeRequest(const Shared_Attribute_Data &data) {
+  for (auto it = data.begin(); it != data.end(); ++it) {
+    Serial.println(it->key().c_str());
+    // Shared attributes have to be parsed by their type.
+    Serial.println(it->value().as<const char*>());
+  }
+
+  const size_t jsonSize = Helper::Measure_Json(data);
+  char buffer[jsonSize];
+  serializeJson(data, buffer, jsonSize);
+  Serial.println(buffer);
+}
+
 void setup() {
   Serial.begin(SERIAL_DEBUG_BAUD);
   Serial.println("\n Starting");
@@ -193,81 +222,44 @@ void setup() {
     }
 
   setupWifiManager(DRD_DETECTED);
-
-// Time Alarms
-  setTime(8,29,0,1,1,11); // set time to Saturday 8:29:00am Jan 1 2011
-
-  // create the alarms, to trigger at specific times
-  Alarm.alarmRepeat(20,0,0, turnLightsOn);  // 8:00pm every day (8,30,0, MorningAlarm)
-  Alarm.alarmRepeat(4,0,0, turnLightsOff);  // 4:00am every day (17,45,0,EveningAlarm)
-
-  // If analog input pin 0 is unconnected, random analog
-  // noise will cause the call to randomSeed() to generate
-  // different seed numbers each time the sketch runs.
-  // randomSeed() will then shuffle the random function.
-  randomSeed(analogRead(0));
-
 }
 
 void loop() {
   if(millis()-mtime > (TIME_TO_SEND_TELEMETRY * 1000)){
     if(WiFi.status() == WL_CONNECTED){
-      getTime();
       if (!tb.connected()) {
         // Reconnect to the ThingsBoard server,
         // if a connection was disrupted or has not yet been established
         Serial.printf("[INFO] Connecting to: (%s) with token (%s)\n", THINGSBOARD_SERVER, TOKEN);
         if (!tb.connect(THINGSBOARD_SERVER, TOKEN, THINGSBOARD_PORT)) {
           Serial.println("[ERROR] Failed to connect");
+          subscribed = false;
         }
-      }
-      /*
-      Serial.println("Sending temperature data...");
-      tb.sendTelemetryData("temperature", random(10, 31));
-      Serial.println("Sending humidity data...");
-      tb.sendTelemetryData("humidity", random(40, 90));
-      */
-      /*
-      if (BH1750_DETECTED) {  
-        sendTelemetry(getBh1750Data());
-      }
-
-      if (BME280_DETECTED) {  
-        struct bme280 bme280Data;
-        bme280Data = getBme280Data();
-        sendTelemetry(bme280Data);
-      }
-
-      if (MQ_DETECTED) {  
-        struct mq mqData;
-        mqData = getMqData();
-        sendTelemetry(mqData);
-      }
-      */
-      
-      struct bme280 bme280Data;
-      bme280Data = getBme280Data();
-      
-      struct mq mqData;
-      mqData = getMqData();
-      
-      sendTelemetry(getBh1750Data(), bme280Data, mqData);
-
-      if (!subscribed) {
-        Serial.println("Subscribing for RPC...");
-        const std::array<RPC_Callback, 2U> callbacks = {
-          RPC_Callback{ RPC_TEMPERATURE_METHOD,    processTemperatureChange },
-          RPC_Callback{ RPC_SWITCH_METHOD,         processSwitchChange }
-        };
-        // Perform a subscription. All consequent data processing will happen in
-        // processTemperatureChange() and processSwitchChange() functions,
-        // as denoted by callbacks array.
-        if (!tb.RPC_Subscribe(callbacks.cbegin(), callbacks.cend())) {
-          Serial.println("Failed to subscribe for RPC");
-          return;
+      } else {
+        /*
+        if (!subscribed) {
+          Serial.println("Subscribing for RPC...");
+          const std::array<RPC_Callback, 2U> callbacks = {
+            RPC_Callback{ RPC_TEMPERATURE_METHOD,    processTemperatureChange },
+            RPC_Callback{ RPC_SWITCH_METHOD,         processSwitchChange }
+          };
+          // Perform a subscription. All consequent data processing will happen in
+          // processTemperatureChange() and processSwitchChange() functions,
+          // as denoted by callbacks array.
+          if (!tb.RPC_Subscribe(callbacks.cbegin(), callbacks.cend())) {
+            Serial.println("Failed to subscribe for RPC");
+            return;
+          }
+          Serial.println("Subscribe done");
+          subscribed = true;
         }
-        Serial.println("Subscribe done");
-        subscribed = true;
+        */
+        if (SET_TIME){
+          setTime();
+        }
+        sendTelemetryJson(getBh1750DataJson());
+        sendTelemetryJson(getBme280DataJson());
+        sendTelemetryJson(getMqDataJson());
       }
     } else {
       Serial.println("No Wifi");
@@ -275,16 +267,7 @@ void loop() {
     }
     mtime = millis();
   }
-
   tb.loop();
-}
-
-void turnLightsOn(){
-  Serial.println("Alarm: - turn lights on");
-}
-
-void turnLightsOff(){
-  Serial.println("Alarm: - turn lights off");
 }
 
 void setupBh1750Sensor(){
@@ -343,85 +326,56 @@ void setupBme280Sensor(){
   }
 }
 
-void sendTelemetry(float lux, struct bme280 bme280Data, struct mq mqData){
-  Serial.print("[SENSOR] Lux: ");
-  Serial.println(lux);
-
-  tb.sendTelemetryData("lux", lux);
-
-  Serial.print("[SENSOR] Temperature: ");
-  Serial.println(bme280Data.tempMean);
-  Serial.print("[SENSOR] Humidity: ");
-  Serial.println(bme280Data.humidityMean);
-  Serial.print("[SENSOR] Pressure: ");
-  Serial.println(bme280Data.pressureMean);
-  tb.sendTelemetryData("temperature", bme280Data.tempMean);
-  tb.sendTelemetryData("humidity", bme280Data.humidityMean);
-  tb.sendTelemetryData("pressure", bme280Data.pressureMean);
-
-  Serial.print("[SENSOR] CO: ");
-  Serial.println(mqData.co);
-  Serial.print("[SENSOR] CO2: ");
-  Serial.println(mqData.co2);
-  Serial.print("[SENSOR] ALCOHOL: ");
-  Serial.println(mqData.alcohol);
-  Serial.print("[SENSOR] TOLUEN: ");
-  Serial.println(mqData.toluen);
-  Serial.print("[SENSOR] NH4: ");
-  Serial.println(mqData.nh4);
-  Serial.print("[SENSOR] ACETON: ");
-  Serial.println(mqData.aceton);
-
-  tb.sendTelemetryData("co", mqData.co);
-  tb.sendTelemetryData("co2", mqData.co2);
-  tb.sendTelemetryData("alcohol", mqData.alcohol);
-  tb.sendTelemetryData("toluen", mqData.toluen);
-  tb.sendTelemetryData("nh4", mqData.nh4);
-  tb.sendTelemetryData("aceton", mqData.aceton);
+void sendTelemetryJson(const JsonVariantConst &data){
+  serializeJsonPretty(data, Serial);
+  Serial.println();
+  tb.sendTelemetryJson(data, Helper::Measure_Json(data));
 }
 
-struct mq getMqData(){
-  mq localgetMqData;
-      MQ135.update(); // Update data, the arduino will read the voltage from the analog pin
-      MQ135.setA(605.18); MQ135.setB(-3.937); // Configure the equation to calculate CO concentration value
-      localgetMqData.co = MQ135.readSensor();
-
-      MQ135.setA(110.47); MQ135.setB(-2.862); // Configure the equation to calculate CO2 concentration value
-      localgetMqData.co2 = MQ135.readSensor();
-
-      MQ135.setA(77.255); MQ135.setB(-3.18); //Configure the equation to calculate Alcohol concentration value
-      localgetMqData.alcohol = MQ135.readSensor();
-
-      MQ135.setA(44.947); MQ135.setB(-3.445); // Configure the equation to calculate Toluen concentration value
-      localgetMqData.toluen = MQ135.readSensor();
-
-      MQ135.setA(102.2 ); MQ135.setB(-2.473); // Configure the equation to calculate NH4 concentration value
-      localgetMqData.nh4 = MQ135.readSensor();
-
-      MQ135.setA(34.668); MQ135.setB(-3.369); // Configure the equation to calculate Aceton concentration value
-      localgetMqData.aceton = MQ135.readSensor();
-  return localgetMqData;
-
-      /*
-        Exponential regression:
-      GAS      | a      | b
-      CO       | 605.18 | -3.937  
-      Alcohol  | 77.255 | -3.18 
-      CO2      | 110.47 | -2.862
-      Toluen  | 44.947 | -3.445
-      NH4      | 102.2  | -2.473
-      Aceton  | 34.668 | -3.369
-      */
+JsonDocument getBh1750DataJson(){
+  JsonDocument json;
+  json["lux"] = luxMeter.readLightLevel();
+  return json;
 }
 
-struct bme280 getBme280Data(){
-  bme280 localBme280Data;
+JsonDocument getMqDataJson(){
+  MQ135.update(); // Update data, the arduino will read the voltage from the analog pin
+  JsonDocument json;
+    MQ135.setA(605.18); MQ135.setB(-3.937); // Configure the equation to calculate CO concentration value
+  json["co"]      = MQ135.readSensor();
+    MQ135.setA(110.47); MQ135.setB(-2.862); // Configure the equation to calculate CO2 concentration value
+  json["co2"]     = MQ135.readSensor();
+    MQ135.setA(77.255); MQ135.setB(-3.18); //Configure the equation to calculate Alcohol concentration value
+  json["alcohol"] = MQ135.readSensor();
+    MQ135.setA(44.947); MQ135.setB(-3.445); // Configure the equation to calculate Toluen concentration value
+  json["toluen"]  = MQ135.readSensor();
+    MQ135.setA(102.2 ); MQ135.setB(-2.473); // Configure the equation to calculate NH4 concentration value
+  json["nh4"]     = MQ135.readSensor();
+    MQ135.setA(34.668); MQ135.setB(-3.369); // Configure the equation to calculate Aceton concentration value
+  json["aceton"]  = MQ135.readSensor();
+
+  return json;
+  /*
+    Exponential regression:
+  GAS      | a      | b
+  CO       | 605.18 | -3.937  
+  Alcohol  | 77.255 | -3.18 
+  CO2      | 110.47 | -2.862
+  Toluen  | 44.947 | -3.445
+  NH4      | 102.2  | -2.473
+  Aceton  | 34.668 | -3.369
+  */
+}
+
+JsonDocument getBme280DataJson(){
+  JsonDocument json;
+
   allTemp = 0; //Restart the temperature sum
   allHumidity = 0; //Restart the humidity sum
   allPressure = 0; //Restart the pressure sum
 
   for(i = 0;i < 10;i++){
-    delay(5); //delay between each reading to avoid an error
+    Alarm.delay(5); //delay between each reading to avoid an error
     tempBuff = bme.readTemperature();
     humidityBuff = bme.readHumidity();
     pressureBuff = bme.readPressure();
@@ -431,19 +385,11 @@ struct bme280 getBme280Data(){
     allPressure = allPressure + pressureBuff;
   }
 
-  localBme280Data.tempMean = allTemp / 10; //Dividing to get means
-  localBme280Data.humidityMean = allHumidity / 10;
-  localBme280Data.pressureMean = allPressure / 10;
+  json["temperature"] = allTemp / 10; //Dividing to get means
+  json["humidity"] = allHumidity / 10; //Dividing to get means
+  json["pressure"] = allPressure / 10; //Dividing to get means
   
-  return localBme280Data;
-}
-
-float getBh1750Data(){
-  float lux = luxMeter.readLightLevel();
-  Serial.print("Light: ");
-  Serial.print(lux);
-  Serial.println(" lx");
-  return lux;
+  return json;
 }
 
 /************* Wifi Manager *************/
@@ -471,6 +417,16 @@ void setupWifiManager(bool DRD_DETECTED){
   WiFiManagerParameter device_type("devicetype", "Tipo", deviceName, 40, " readonly");
   WiFiManagerParameter device_id("deviceid", "Device Id", deviceid, 40, " readonly");
 
+  //Lights on time
+  WiFiManagerParameter custom_lights_on_hour("houron", "Encender: Hora", lOnHour, 4);
+  WiFiManagerParameter custom_lights_on_min("minon", "Encender: Minuto", lOnMin, 4);
+  WiFiManagerParameter custom_lights_on_sec("secon", "Encender: Segundo", lOnSec, 4);
+
+  //Lights off time
+  WiFiManagerParameter custom_lights_off_hour("houroff", "Apagar: Hora", lOffHour, 4);
+  WiFiManagerParameter custom_lights_off_min("minoff", "Apagar: Minuto", lOffMin, 4);
+  WiFiManagerParameter custom_lights_off_sec("secoff", "Apagar: Segundo", lOffSec, 4);
+
   // callbacks
   wm.setAPCallback(configModeCallback);
   wm.setWebServerCallback(bindServerCallback);
@@ -483,6 +439,16 @@ void setupWifiManager(bool DRD_DETECTED){
   wm.addParameter(&custom_api_token);
   wm.addParameter(&device_type);
   wm.addParameter(&device_id);
+
+  //Lights on time
+  wm.addParameter(&custom_lights_on_hour);
+  wm.addParameter(&custom_lights_on_min);
+  wm.addParameter(&custom_lights_on_sec);
+
+  //Lights off time
+  wm.addParameter(&custom_lights_off_hour);
+  wm.addParameter(&custom_lights_off_min);
+  wm.addParameter(&custom_lights_off_sec);
 
   // invert theme, dark
   wm.setDarkMode(true);
@@ -512,7 +478,7 @@ void setupWifiManager(bool DRD_DETECTED){
   wm.setBreakAfterConfig(true); // needed to use saveWifiCallback
 
   if(DRD_DETECTED || TEST_CP){
-    delay(1000);
+    Alarm.delay(1000);
     if(!wm.startConfigPortal("MaterBox IoT", "123456789")){
       Serial.println("[INFO] Failed to connect and hit timeout");
     } else {
@@ -532,12 +498,24 @@ void setupWifiManager(bool DRD_DETECTED){
   strcpy(THINGSBOARD_SERVER, custom_server.getValue());
   strcpy(TOKEN, custom_api_token.getValue());
   //strcpy(THINGSBOARD_PORT, custom_mqtt_port.getValue());
+
+  //Lights on time
+  strcpy(lOnHour, custom_lights_on_hour.getValue());
+  strcpy(lOnMin, custom_lights_on_min.getValue());
+  strcpy(lOnSec, custom_lights_on_sec.getValue());
+
+  //Lights off time
+  strcpy(lOffHour, custom_lights_off_hour.getValue());
+  strcpy(lOffMin, custom_lights_off_min.getValue());
+  strcpy(lOffSec, custom_lights_off_sec.getValue());
   //printConfigInfo("WifiManager");
+
   saveConfigData();
 }
 
 void saveWifiCallback(){
   Serial.println("[CALLBACK] save settings Callback fired");
+
 }
 
 //gets called when WiFiManager enters configuration mode
@@ -572,11 +550,19 @@ void wifiInfo(){
 /************* End Wifi Manager *************/
 
 void saveConfigData() {
-      DynamicJsonDocument json(1024);
+      JsonDocument json;
       json["THINGSBOARD_SERVER"] = THINGSBOARD_SERVER;
       //json["mqtt_port"] = mqtt_port;
       json["TOKEN"] = TOKEN;
       json["STAND_ALONE"] = STAND_ALONE;
+      //Lights on time
+      json["lOnHour"] = lOnHour;
+      json["lOnMin"] = lOnMin;
+      json["lOnSec"] = lOnSec;
+      //Lights off time
+      json["lOffHour"] = lOffHour;
+      json["lOffMin"] = lOffMin;
+      json["lOffSec"] = lOffSec;
       printConfigInfo("Saving data");
       File configFile = LittleFS.open("/config.json", "w");
       if (!configFile) {
@@ -595,7 +581,7 @@ void loadConfigData() {
     Serial.println("An Error has occurred while mounting LittleFS");
     //Print the error on display
     Serial.println("Mounting Error");
-    delay(1000);
+    Alarm.delay(1000);
     return;
   } else {
     Serial.println("mounted file system");
@@ -611,7 +597,7 @@ void loadConfigData() {
         std::unique_ptr<char[]> buf(new char[size]);
         configFile.readBytes(buf.get(), size);
 
-        DynamicJsonDocument json(1024);
+        JsonDocument json;
         auto deserializeError = deserializeJson(json, buf.get());
         serializeJson(json, Serial);
         if (!deserializeError) {
@@ -620,6 +606,16 @@ void loadConfigData() {
           //strcpy(THINGSBOARD_PORT, json["THINGSBOARD_PORT"]);
           strcpy(TOKEN, json["TOKEN"]);
           STAND_ALONE = json["STAND_ALONE"];
+
+          //Lights on time
+          strcpy(lOnHour, json["lOnHour"]);
+          strcpy(lOnMin, json["lOnMin"]);
+          strcpy(lOnSec, json["lOnSec"]);
+          //Lights off time
+          strcpy(lOffHour, json["lOffHour"]);
+          strcpy(lOffMin, json["lOffMin"]);
+          strcpy(lOffSec, json["lOffSec"]);
+
           printConfigInfo("Loaded data");
         } else {
           Serial.println("failed to load json config");
@@ -653,7 +649,45 @@ void getDeviceId(byte macAddressArray[], unsigned int len, char buffer[]){
     buffer[len*2] = '\0';
 }
 
-void getTime() {
+void setTime(){
+  Serial.println("[RPC] request time from server...");
+  const RPC_Request_Callback callback(RPC_REQUEST_CALLBACK_METHOD_NAME, &processTime);
+  // Perform a request of the given RPC method. Optional responses are handled in processTime
+  if (!tb.RPC_Request(callback)) {
+    Serial.println("Failed to request for RPC");
+  } else {
+    Serial.println("Request done");
+    SET_TIME = false;
+  }
+}
+
+void setTimeAlarms(){
+  Serial.println("Setting alarms time");
+  // create the alarms, to trigger at specific times
+  // 8:00pm every day (8,30,0, MorningAlarm)
+  Alarm.alarmRepeat(atoi(lOnHour),atoi(lOnMin),atoi(lOnSec), turnLightsOn);
+  Alarm.alarmRepeat(atoi(lOffHour),atoi(lOffMin),atoi(lOffSec), turnLightsOff);
+  Alarm.timerRepeat(15, Repeats);           // timer for every 15 seconds
+  SET_ALARMS = false;
+
+}
+
+void Repeats() {
+  Serial.println("15 second timer");
+}
+
+void turnLightsOn(){
+  Serial.println("Alarm: - turn lights on");
+  tb.sendTelemetryData("lights", 1);
+}
+
+void turnLightsOff(){
+  Serial.println("Alarm: - turn lights off");
+  tb.sendTelemetryData("lights", 0);
+}
+
+struct tm getTime() {
+  struct tm timeinfo;
   int tz           = -6;
   int dst          = 0;
   time_t now       = time(nullptr);
@@ -662,17 +696,19 @@ void getTime() {
   configTime(tz * 3600, dst * 3600, "pool.ntp.org", "time.nist.gov");
   Serial.print("Waiting for NTP time sync: ");
   while (now < 8 * 3600 * 2 ) { // what is this ?
-    delay(100);
+    Alarm.delay(100);
     Serial.print(".");
     now = time(nullptr);
     if((millis() - start) > timeout){
       Serial.println("\n[ERROR] Failed to get NTP time.");
-      return;
+      timeinfo.tm_hour = -1;
+      return timeinfo;
     }
   }
   Serial.println("");
-  struct tm timeinfo;
   gmtime_r(&now, &timeinfo);
   Serial.print("Current time: ");
-  Serial.print(asctime(&timeinfo));
+  Serial.println(asctime(&timeinfo));
+
+  return timeinfo;
 }
