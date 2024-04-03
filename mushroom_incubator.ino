@@ -110,13 +110,6 @@ bool BH1750_DETECTED = false;
 #define SEALEVELPRESSURE_HPA (1013.25)
 Adafruit_BME280 bme; // I2C
 bool BME280_DETECTED = false;
-float tempBuff; //Buffer for the raw temperature taken by the sensor
-float humidityBuff; //Buffer for the raw humidity taken by the sensor
-float pressureBuff; //Buffer for the raw pressure taken by the sensor
-float allTemp; //The sum of all the temperatures taken by the sensor
-float allHumidity; //The sum of all the humidity taken by the sensor
-float allPressure; //The sum of all the pressure taken by the sensor
-int i; //Random variable used to control the loops
 /************* End Sensor BME280 *************/
 
 /************* Sensor MQ-series *************/
@@ -287,6 +280,14 @@ JsonDocument getMqDataJson(){
 }
 
 JsonDocument getBme280DataJson(){
+  float tempBuff; //Buffer for the raw temperature taken by the sensor
+  float humidityBuff; //Buffer for the raw humidity taken by the sensor
+  float pressureBuff; //Buffer for the raw pressure taken by the sensor
+  float allTemp; //The sum of all the temperatures taken by the sensor
+  float allHumidity; //The sum of all the humidity taken by the sensor
+  float allPressure; //The sum of all the pressure taken by the sensor
+  int i; //Random variable used to control the loops
+
   JsonDocument json;
 
   allTemp = 0; //Restart the temperature sum
