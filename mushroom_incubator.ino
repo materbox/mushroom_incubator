@@ -43,14 +43,20 @@ char TOKEN[40] = "TEST_TOKEN";
 constexpr uint16_t THINGSBOARD_PORT = 1883U;
 // Maximum size packets will ever be sent or received by the underlying MQTT client
 constexpr uint16_t MAX_MESSAGE_SIZE = 256U;
-
+// RPC
+// Statuses for subscribing to rpc
+bool subscribed = false;
 constexpr const char RPC_TEMPERATURE_METHOD[] = "example_set_temperature";
 constexpr const char RPC_SWITCH_METHOD[] = "example_set_switch";
+
+constexpr const char RPC_TEMPERATURE_ALARM_MANAGEMENT_METHOD[] = "set_temperature_alarm";
+constexpr const char RPC_CO2_ALARM_MANAGEMENT_METHOD[] = "set_co2_alarm";
+constexpr const char RPC_ALARM_STATE_KEY[] = "state";
+
 constexpr const char RPC_TEMPERATURE_KEY[] = "temp";
-constexpr const char RPC_SWITCH_KEY[] PROGMEM = "switch";
+constexpr const char RPC_SWITCH_KEY[] = "switch";
 constexpr const char RPC_RESPONSE_KEY[] = "example_response";
 constexpr char RPC_REQUEST_CALLBACK_METHOD_NAME[] = "getCurrentTime";
-
 
 WiFiClient espClient;
 // Initalize the Mqtt client instance
@@ -128,78 +134,6 @@ bool MQ_DETECTED = false;
 MQUnifiedsensor MQ135(BOARD, VOLTAGE_RESOLUTION, ADC_BIT_RESOLUTION, MQ_ANALOG_PIN, MQ_TYPE);
 /************* End Sensor MQ-series *************/
 
-// Statuses for subscribing to rpc
-bool subscribed = false;
-
-/// @brief Processes function for RPC response of "getCurrentTime".
-/// If no response is set the callback is called with {"error": "timeout"}, after a few seconds
-/// @param data Data containing the rpc response that was sent by the cloud
-void processTime(const JsonVariantConst &data) {
-  time_t time = data["time"];
-  Serial.print("Time: ");
-  Serial.println(time);
-  // Time Alarms
-  setTime (time);
-  // (hour(24 format),minutes,seconds,month,day,year) set time to Saturday 8:29:00am Jan 1 2024
-  //setTime(timeinfo.tm_hour,timeinfo.tm_min,timeinfo.tm_sec,timeinfo.tm_mon,timeinfo.tm_mday,timeinfo.tm_year + 1900);
-  SET_TIME = false;
-  if(SET_ALARMS){
-    setTimeAlarms();
-  }
-}
-
-/// @brief Processes function for RPC call "example_set_temperature"
-/// RPC_Data is a JSON variant, that can be queried using operator[]
-/// See https://arduinojson.org/v5/api/jsonvariant/subscript/ for more details
-/// @param data Data containing the rpc data that was called and its current value
-/// @return Response that should be sent to the cloud. Useful for getMethods
-RPC_Response processTemperatureChange(const RPC_Data &data) {
-  Serial.println("Received the set temperature RPC method");
-
-  // Process data
-  const float example_temperature = data[RPC_TEMPERATURE_KEY];
-  Serial.print("Example temperature: ");
-  Serial.println(example_temperature);
-
-  // Just an response example
-  StaticJsonDocument<JSON_OBJECT_SIZE(1)> doc;
-  doc[RPC_RESPONSE_KEY] = 42;
-  return RPC_Response(doc);
-}
-
-/// @brief Processes function for RPC call "example_set_switch"
-/// RPC_Data is a JSON variant, that can be queried using operator[]
-/// See https://arduinojson.org/v5/api/jsonvariant/subscript/ for more details
-/// @param data Data containing the rpc data that was called and its current value
-/// @return Response that should be sent to the cloud. Useful for getMethods
-RPC_Response processSwitchChange(const RPC_Data &data) {
-  Serial.println("Received the set switch method");
-
-  // Process data
-  const bool switch_state = data[RPC_SWITCH_KEY];
-
-  Serial.print("Example switch state: ");
-  Serial.println(switch_state);
-
-  // Just an response example
-  StaticJsonDocument<JSON_OBJECT_SIZE(1)> doc;
-  doc[RPC_RESPONSE_KEY] = 22.02;
-  return RPC_Response(doc);
-}
-
-void processClientAttributeRequest(const Shared_Attribute_Data &data) {
-  for (auto it = data.begin(); it != data.end(); ++it) {
-    Serial.println(it->key().c_str());
-    // Shared attributes have to be parsed by their type.
-    Serial.println(it->value().as<const char*>());
-  }
-
-  const size_t jsonSize = Helper::Measure_Json(data);
-  char buffer[jsonSize];
-  serializeJson(data, buffer, jsonSize);
-  Serial.println(buffer);
-}
-
 void setup() {
   Serial.begin(SERIAL_DEBUG_BAUD);
   Serial.println("\n Starting");
@@ -236,24 +170,9 @@ void loop() {
           subscribed = false;
         }
       } else {
-        /*
-        if (!subscribed) {
-          Serial.println("Subscribing for RPC...");
-          const std::array<RPC_Callback, 2U> callbacks = {
-            RPC_Callback{ RPC_TEMPERATURE_METHOD,    processTemperatureChange },
-            RPC_Callback{ RPC_SWITCH_METHOD,         processSwitchChange }
-          };
-          // Perform a subscription. All consequent data processing will happen in
-          // processTemperatureChange() and processSwitchChange() functions,
-          // as denoted by callbacks array.
-          if (!tb.RPC_Subscribe(callbacks.cbegin(), callbacks.cend())) {
-            Serial.println("Failed to subscribe for RPC");
-            return;
-          }
-          Serial.println("Subscribe done");
-          subscribed = true;
+          if (!subscribed) {
+            rpcSubscribe();
         }
-        */
         if (SET_TIME){
           setTime();
         }
@@ -391,6 +310,83 @@ JsonDocument getBme280DataJson(){
   
   return json;
 }
+
+/************* RPC callbacks *************/
+void rpcSubscribe(){
+  Serial.println("Subscribing for RPC...");
+
+  const std::array<RPC_Callback, 2U> callbacks = {
+    RPC_Callback{ RPC_TEMPERATURE_ALARM_MANAGEMENT_METHOD,  processTemperatureAlarm },
+    RPC_Callback{ RPC_CO2_ALARM_MANAGEMENT_METHOD,          processCo2Alarm }
+  };
+
+  // Perform a subscription. All consequent data processing will happen in
+  // processTemperatureChange() and processSwitchChange() functions,
+  // as denoted by callbacks array.
+  if (!tb.RPC_Subscribe(callbacks.cbegin(), callbacks.cend())) {
+    Serial.println("Failed to subscribe for RPC");
+    return;
+  }
+  Serial.println("Subscribe done");
+  subscribed = true;
+}
+
+/// @brief Processes function for RPC call "set_temperature_alarm"
+/// RPC_Data is a JSON variant, that can be queried using operator[]
+/// See https://arduinojson.org/v5/api/jsonvariant/subscript/ for more details
+/// @param data Data containing the rpc data that was called and its current value
+/// @return Response that should be sent to the cloud. Useful for getMethods
+RPC_Response processTemperatureAlarm(const RPC_Data &data) {
+  Serial.println("Received the set temperature alarm RPC method");
+
+  // Process data
+  const int state = data[RPC_ALARM_STATE_KEY];
+  if (state){
+    Serial.println("Alarma de temperatura creada");
+  }
+  if (!state){
+    Serial.println("Alarma de temperatura borrada");
+  }
+  return RPC_Response(RPC_RESPONSE_KEY, 42);
+}
+
+/// @brief Processes function for RPC call "set_co2_alarm"
+/// RPC_Data is a JSON variant, that can be queried using operator[]
+/// See https://arduinojson.org/v5/api/jsonvariant/subscript/ for more details
+/// @param data Data containing the rpc data that was called and its current value
+/// @return Response that should be sent to the cloud. Useful for getMethods
+RPC_Response processCo2Alarm(const RPC_Data &data) {
+  Serial.println("Received the set CO2 alarm RPC method");
+
+  // Process data
+  const int state = data[RPC_ALARM_STATE_KEY];
+  if (state){
+    Serial.println("Alarma de CO2 creada");
+  }
+  if (!state){
+    Serial.println("Alarma de CO2 borrada");
+  }
+  return RPC_Response(RPC_RESPONSE_KEY, 42);
+}
+
+/// @brief Processes function for RPC response of "getCurrentTime".
+/// If no response is set the callback is called with {"error": "timeout"}, after a few seconds
+/// @param data Data containing the rpc response that was sent by the cloud
+void processTime(const JsonVariantConst &data) {
+  time_t time = data["time"];
+  Serial.print("Time: ");
+  Serial.println(time);
+  // Time Alarms
+  setTime (time);
+  // (hour(24 format),minutes,seconds,month,day,year) set time to Saturday 8:29:00am Jan 1 2024
+  //setTime(timeinfo.tm_hour,timeinfo.tm_min,timeinfo.tm_sec,timeinfo.tm_mon,timeinfo.tm_mday,timeinfo.tm_year + 1900);+
+
+  SET_TIME = false;
+  if(SET_ALARMS){
+    setTimeAlarms();
+  }
+}
+/************* End RPC callbacks *************/
 
 /************* Wifi Manager *************/
 void setupWifiManager(bool DRD_DETECTED){
