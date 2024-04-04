@@ -94,6 +94,19 @@ char lOnSec[]    = "0";
 char lOffHour[]  = "14";
 char lOffMin[]   = "0";
 char lOffSec[]   = "0";
+
+/************* Relay control *************/
+bool state = false;
+//using namespace ace_button;
+#define Relay1 5   // GPIO5-D1   morado
+#define Relay2 4   // GPIO4-D2   naranja
+#define Relay3 14  // GPIO14-D5   amarillo
+#define Relay4 12  // GPIO12-D6    azul
+
+// Helper macro to calculate array size
+#define COUNT_OF(x) ((sizeof(x)/sizeof(0[x])) / ((size_t)(!(sizeof(x) % sizeof(0[x])))))
+
+/************* End Relay control *************/
 /************* End Lights control *************/
 
 /************* Sensor BH1750 *************/
@@ -137,6 +150,21 @@ void setup() {
   setupBh1750Sensor();
   setupBme280Sensor();
   setupMqSensor();
+
+/************* Relay control *************/
+//  pinMode(Relay1, OUTPUT);
+//  pinMode(Relay2, OUTPUT);
+  pinMode(Relay3, OUTPUT);
+  pinMode(Relay4, OUTPUT);
+  
+  //During Starting all Relays should TURN OFF
+//  digitalWrite(Relay1, HIGH);
+//  digitalWrite(Relay2, HIGH);
+  digitalWrite(Relay3, HIGH);
+  digitalWrite(Relay4, HIGH);
+
+/************* End Relay control *************/
+
 
   drd = new DoubleResetDetector(DRD_TIMEOUT, DRD_ADDRESS);
 
@@ -675,11 +703,13 @@ void Repeats() {
 
 void turnLightsOn(){
   Serial.println("Alarm: - turn lights on");
+  digitalWrite(Relay3, LOW);
   tb.sendTelemetryData("lights", 1);
 }
 
 void turnLightsOff(){
   Serial.println("Alarm: - turn lights off");
+  digitalWrite(Relay3, HIGH);
   tb.sendTelemetryData("lights", 0);
 }
 
