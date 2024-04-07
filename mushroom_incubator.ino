@@ -699,6 +699,13 @@ void setTimeAlarms(){
 
 void Repeats() {
   Serial.println("15 second timer");
+  if (!state){
+    digitalWrite(Relay3, LOW);
+    state = true;
+  } else {
+    digitalWrite(Relay3, HIGH);
+    state = false;
+  }
 }
 
 void turnLightsOn(){
