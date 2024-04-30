@@ -139,7 +139,6 @@ String MQ_DATA_FILE = "mqdata.txt";
 #define RatioMQ135CleanAir 3.6//RS / R0 = 3.6 ppm  
 //#define calibration_button 13 //Pin to calibrate your sensor
 #include <MQUnifiedsensor.h>      //https://github.com/miguel5612/MQSensorsLib
-
 //Declare Sensor
 MQUnifiedsensor MQ135(BOARD, VOLTAGE_RESOLUTION, ADC_BIT_RESOLUTION, MQ_ANALOG_PIN, MQ_TYPE);
 /************* End Sensor MQ-series *************/
@@ -226,17 +225,46 @@ void setupBh1750Sensor(){
 }
 
 void setupMqSensor(){
- //Set math model to calculate the PPM concentration and the value of constants
   if(MQ_DATA_DELETE){
     deleteFileData(MQ_DATA_FILE);
   }
+  float calcR0 = 0;
+  //Set math model to calculate the PPM concentration and the value of constants
   MQ135.setRegressionMethod(1); //_PPM =  a*ratio^b
-  MQ135.init(); 
-  /* 
-    //If the RL value is different from 10K please assign your RL value with the following method:
-    MQ135.setRL(10);
-  */
-  /*****************************  MQ CAlibration ********************************************/ 
+  MQ135.init();
+  MQ135.setRL(2); //If the RL value is different from 10K, assign new RL value
+
+  JsonDocument json;
+  json = loadData(MQ_DATA_FILE);
+  
+  if (!json["ERROR"]){
+  //if (json.containsKey("R0_VALUE")){
+    calcR0 = json["R0_VALUE"];
+    Serial.print("Existe el archivo MQ135.txt con R0= ");
+    Serial.println(calcR0);
+  } else {
+    calcR0 = mqSensorCalibration();
+    Serial.print("Se mandó a calibrar con R0= ");
+    Serial.println(calcR0);
+  }
+
+  if(isinf(calcR0)) {
+    Serial.println("Warning: Conection issue, R0 is infinite (Open circuit detected) please check your wiring and supply");
+    MQ_DETECTED = false;
+    while(1);
+  } else if(calcR0 == 0){
+    Serial.println("Warning: Conection issue found, R0 is zero (Analog pin shorts to ground) please check your wiring and supply");
+    MQ_DETECTED = false;
+    while(1);
+  } else {
+    MQ135.setR0(calcR0);
+    Serial.println("MQ135 sensor started");
+    MQ_DETECTED = true;
+  }
+}
+
+float mqSensorCalibration(){
+/*****************************  MQ CAlibration ********************************************/ 
   // Explanation: 
   // In this routine the sensor will measure the resistance of the sensor supposedly before being pre-heated
   // and on clean air (Calibration conditions), setting up R0 value.
@@ -251,16 +279,14 @@ void setupMqSensor(){
     calcR0 += MQ135.calibrate(RatioMQ135CleanAir);
     Serial.print(".");
   }
-  MQ135.setR0(calcR0/10);
-  Serial.println("  done!.");
+  calcR0 = calcR0/10;
   
-  if(isinf(calcR0)) {Serial.println("Warning: Conection issue, R0 is infinite (Open circuit detected) please check your wiring and supply"); while(1);}
-  if(calcR0 == 0){
-    Serial.println("Warning: Conection issue found, R0 is zero (Analog pin shorts to ground) please check your wiring and supply");
-      while(1);
-  }
+  JsonDocument json;
+  json["R0_VALUE"] = calcR0;
+  saveData(json, MQ_DATA_FILE);
+  Serial.println("  done!.");
   /*****************************  MQ CAlibration ********************************************/ 
-  MQ_DETECTED = true;
+  return calcR0;
 }
 
 void setupBme280Sensor(){
@@ -307,9 +333,9 @@ JsonDocument getMqDataJson(){
   CO       | 605.18 | -3.937  
   Alcohol  | 77.255 | -3.18 
   CO2      | 110.47 | -2.862
-  Toluen  | 44.947 | -3.445
+  Toluen   | 44.947 | -3.445
   NH4      | 102.2  | -2.473
-  Aceton  | 34.668 | -3.369
+  Aceton   | 34.668 | -3.369
   */
 }
 
