@@ -80,6 +80,7 @@ bool STAND_ALONE     = false; // use device without thingsboard server
 bool RESET_SETTINGS  = false; //reset WIFI settings - for testing
 bool WM_CONNECTED    = false;
 bool DRD_DETECTED    = false;
+bool SAVE_PARAMS     = false;
 /************* End Wifi Manager *************/
 
 /************* Lights control *************/
@@ -590,6 +591,7 @@ void configModeCallback (WiFiManager *myWiFiManager) {
 
 void saveParamCallback(){
   Serial.println("[CALLBACK] saveParamCallback fired");
+  SAVE_PARAMS = true;
 }
 
 void bindServerCallback(){
