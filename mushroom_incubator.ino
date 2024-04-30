@@ -70,6 +70,7 @@ const char* modes[] = { "NULL", "STA", "AP", "STA+AP" };
 
 WiFiManager wm;
 
+String WM_DATA_FILE = "config.txt";
 bool TEST_CP         = false; // always start the configportal, even if ap found
 int  TESP_CP_TIMEOUT = 180; // test cp timeout
 bool TEST_NET        = true; // do a network test after connect, (gets ntp time)
@@ -127,6 +128,8 @@ bool BME280_DETECTED = false;
 
 /************* Sensor MQ-series *************/
 bool MQ_DETECTED = false;
+bool MQ_DATA_DELETE  = false; // delete MQ_DATA_FILE - for testing
+String MQ_DATA_FILE = "mqdata.txt";
 #define BOARD "ESP8266"
 #define VOLTAGE_RESOLUTION 5
 #define MQ_ANALOG_PIN A0 //Analog input 0 of your arduino
@@ -224,6 +227,9 @@ void setupBh1750Sensor(){
 
 void setupMqSensor(){
  //Set math model to calculate the PPM concentration and the value of constants
+  if(MQ_DATA_DELETE){
+    deleteFileData(MQ_DATA_FILE);
+  }
   MQ135.setRegressionMethod(1); //_PPM =  a*ratio^b
   MQ135.init(); 
   /* 
@@ -430,12 +436,29 @@ void setupWifiManager(bool DRD_DETECTED){
 
   //reset settings - for testing
   if (RESET_SETTINGS){
-    deleteConfigData();
+    deleteFileData(WM_DATA_FILE);
     wm.resetSettings();
     wm.erase();
   }
 
-  loadConfigData();
+  JsonDocument json;
+  json = loadData(WM_DATA_FILE);
+  
+  if (!json["ERROR"]){
+    strcpy(THINGSBOARD_SERVER, json["THINGSBOARD_SERVER"]);
+    //strcpy(THINGSBOARD_PORT, json["THINGSBOARD_PORT"]);
+    strcpy(TOKEN, json["TOKEN"]);
+    STAND_ALONE = json["STAND_ALONE"];
+    //Lights on time
+    strcpy(lOnHour, json["lOnHour"]);
+    strcpy(lOnMin, json["lOnMin"]);
+    strcpy(lOnSec, json["lOnSec"]);
+    //Lights off time
+    strcpy(lOffHour, json["lOffHour"]);
+    strcpy(lOffMin, json["lOffMin"]);
+    strcpy(lOffSec, json["lOffSec"]);
+  }
+
   WiFiManagerParameter custom_server("server", "MaterBox server", THINGSBOARD_SERVER, 40);
   //WiFiManagerParameter custom_mqtt_port("port", "port", THINGSBOARD_PORT, 6);
   WiFiManagerParameter custom_api_token("apikey", "Token", TOKEN, 32);
@@ -533,9 +556,25 @@ void setupWifiManager(bool DRD_DETECTED){
   strcpy(lOffHour, custom_lights_off_hour.getValue());
   strcpy(lOffMin, custom_lights_off_min.getValue());
   strcpy(lOffSec, custom_lights_off_sec.getValue());
-  //printConfigInfo("WifiManager");
 
-  saveConfigData();
+  if (SAVE_PARAMS){
+    JsonDocument json;
+    json["THINGSBOARD_SERVER"] = THINGSBOARD_SERVER;
+    //json["mqtt_port"] = mqtt_port;
+    json["TOKEN"] = TOKEN;
+    json["STAND_ALONE"] = STAND_ALONE;
+    //Lights on time
+    json["lOnHour"] = lOnHour;
+    json["lOnMin"] = lOnMin;
+    json["lOnSec"] = lOnSec;
+    //Lights off time
+    json["lOffHour"] = lOffHour;
+    json["lOffMin"] = lOffMin;
+    json["lOffSec"] = lOffSec;
+
+    saveData(json, WM_DATA_FILE);
+    //saveConfigData();
+  }
 }
 
 void saveWifiCallback(){
@@ -573,82 +612,58 @@ void wifiInfo(){
   Serial.println("[WIFI] HOSTNAME: " + (String)WiFi.getHostname());
 }
 /************* End Wifi Manager *************/
-
-void saveConfigData() {
-      JsonDocument json;
-      json["THINGSBOARD_SERVER"] = THINGSBOARD_SERVER;
-      //json["mqtt_port"] = mqtt_port;
-      json["TOKEN"] = TOKEN;
-      json["STAND_ALONE"] = STAND_ALONE;
-      //Lights on time
-      json["lOnHour"] = lOnHour;
-      json["lOnMin"] = lOnMin;
-      json["lOnSec"] = lOnSec;
-      //Lights off time
-      json["lOffHour"] = lOffHour;
-      json["lOffMin"] = lOffMin;
-      json["lOffSec"] = lOffSec;
+// Save data to eeprom in the specific file
+void saveData(JsonDocument json, String fileName) {
       printConfigInfo("Saving data");
-      File configFile = LittleFS.open("/config.json", "w");
-      if (!configFile) {
+      File dataFile = LittleFS.open("/" + fileName, "w");
+      if (!dataFile) {
         Serial.println("failed to open config file for writing");
+      } else {
+        serializeJson(json, dataFile);     
       }
-      serializeJson(json, Serial);
-      serializeJson(json, configFile);
-      configFile.close();
+      dataFile.close();
       Serial.println();
 }
 
-void loadConfigData() {
-    //https://www.hackster.io/Neutrino-1/littlefs-read-write-delete-using-esp8266-and-arduino-ide-867180
-    //read configuration from FS config.json
+JsonDocument loadData(String fileName) {
+  JsonDocument json;
+  //https://www.hackster.io/Neutrino-1/littlefs-read-write-delete-using-esp8266-and-arduino-ide-867180
+  //read file from FileSistem
   if(!LittleFS.begin()){
     Serial.println("An Error has occurred while mounting LittleFS");
     //Print the error on display
     Serial.println("Mounting Error");
     Alarm.delay(1000);
-    return;
+    json["ERROR"] = true;
   } else {
     Serial.println("mounted file system");
-    if (LittleFS.exists("/config.json")) {
+    if (LittleFS.exists("/" + fileName)) {
       //file exists, reading and loading
       Serial.println("reading config file");
-      File configFile = LittleFS.open("/config.json", "r");
-      if (configFile) {
-        Serial.println("opened config file");
-        size_t size = configFile.size();
+      File dataFile = LittleFS.open("/" + fileName, "r");
+      if (dataFile) {
+        Serial.println("opened data file");
+        size_t size = dataFile.size();
         
         // Allocate a buffer to store contents of the file.
         std::unique_ptr<char[]> buf(new char[size]);
-        configFile.readBytes(buf.get(), size);
-
-        JsonDocument json;
+        dataFile.readBytes(buf.get(), size);
         auto deserializeError = deserializeJson(json, buf.get());
-        serializeJson(json, Serial);
+        dataFile.close();
+        json["ERROR"] = false;
+
         if (!deserializeError) {
-          Serial.println("\nparsed json");
-          strcpy(THINGSBOARD_SERVER, json["THINGSBOARD_SERVER"]);
-          //strcpy(THINGSBOARD_PORT, json["THINGSBOARD_PORT"]);
-          strcpy(TOKEN, json["TOKEN"]);
-          STAND_ALONE = json["STAND_ALONE"];
-
-          //Lights on time
-          strcpy(lOnHour, json["lOnHour"]);
-          strcpy(lOnMin, json["lOnMin"]);
-          strcpy(lOnSec, json["lOnSec"]);
-          //Lights off time
-          strcpy(lOffHour, json["lOffHour"]);
-          strcpy(lOffMin, json["lOffMin"]);
-          strcpy(lOffSec, json["lOffSec"]);
-
-          printConfigInfo("Loaded data");
+          printConfigInfo("Data loaded");
         } else {
-          Serial.println("failed to load json config");
+          Serial.println("failed to load data file");
+          json["ERROR"] = true;
         }
-        configFile.close();
       }
+    } else {
+      json["ERROR"] = true;
     }
   }
+  return json;
 }
 
 void printConfigInfo(String FROM){
