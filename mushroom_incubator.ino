@@ -340,34 +340,22 @@ JsonDocument getMqDataJson(){
 }
 
 JsonDocument getBme280DataJson(){
-  float tempBuff; //Buffer for the raw temperature taken by the sensor
-  float humidityBuff; //Buffer for the raw humidity taken by the sensor
-  float pressureBuff; //Buffer for the raw pressure taken by the sensor
-  float allTemp; //The sum of all the temperatures taken by the sensor
-  float allHumidity; //The sum of all the humidity taken by the sensor
-  float allPressure; //The sum of all the pressure taken by the sensor
+  float temperature = 0;
+  float humidity    = 0;
+  float pressure    = 0;
   int i; //Random variable used to control the loops
 
   JsonDocument json;
-
-  allTemp = 0; //Restart the temperature sum
-  allHumidity = 0; //Restart the humidity sum
-  allPressure = 0; //Restart the pressure sum
-
   for(i = 0;i < 10;i++){
     Alarm.delay(5); //delay between each reading to avoid an error
-    tempBuff = bme.readTemperature();
-    humidityBuff = bme.readHumidity();
-    pressureBuff = bme.readPressure();
-    
-    allTemp = allTemp + tempBuff;
-    allHumidity = allHumidity + humidityBuff;
-    allPressure = allPressure + pressureBuff;
+    temperature += bme.readTemperature();
+    humidity    += bme.readHumidity();
+    pressure    += bme.readPressure();
   }
 
-  json["temperature"] = allTemp / 10; //Dividing to get means
-  json["humidity"] = allHumidity / 10; //Dividing to get means
-  json["pressure"] = allPressure / 10; //Dividing to get means
+  json["temperature"] = temperature / 10; //Dividing to get means
+  json["humidity"] = humidity / 10; //Dividing to get means
+  json["pressure"] = pressure / 10; //Dividing to get means
   
   return json;
 }
