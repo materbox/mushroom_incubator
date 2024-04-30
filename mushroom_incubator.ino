@@ -676,9 +676,9 @@ void printConfigInfo(String FROM){
   Serial.println((STAND_ALONE) ? "true" : "false");
 }
 
-void deleteConfigData(){
+void deleteFileData(String fileName){
    //Remove the file
-   LittleFS.remove("/config.json");
+   LittleFS.remove("/" + fileName);
 }
 
 void getDeviceId(byte macAddressArray[], unsigned int len, char buffer[]){
