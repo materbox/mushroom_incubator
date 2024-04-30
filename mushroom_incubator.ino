@@ -151,25 +151,6 @@ void setup() {
   Serial.println("[ERROR]  TEST");
   Serial.println("[INFO] TEST");  
 
-  setupBh1750Sensor();
-  setupBme280Sensor();
-  setupMqSensor();
-
-/************* Relay control *************/
-//  pinMode(Relay1, OUTPUT);
-//  pinMode(Relay2, OUTPUT);
-  pinMode(Relay3, OUTPUT);
-  pinMode(Relay4, OUTPUT);
-  
-  //During Starting all Relays should TURN OFF
-//  digitalWrite(Relay1, HIGH);
-//  digitalWrite(Relay2, HIGH);
-  digitalWrite(Relay3, HIGH);
-  digitalWrite(Relay4, HIGH);
-
-/************* End Relay control *************/
-
-
   drd = new DoubleResetDetector(DRD_TIMEOUT, DRD_ADDRESS);
 
   if (drd->detectDoubleReset()) {
@@ -181,6 +162,24 @@ void setup() {
     }
 
   setupWifiManager(DRD_DETECTED);
+
+  setupBh1750Sensor();
+  setupBme280Sensor();
+  setupMqSensor();
+
+  /************* Relay control *************/
+  //  pinMode(Relay1, OUTPUT);
+  //  pinMode(Relay2, OUTPUT);
+  pinMode(Relay3, OUTPUT);
+  pinMode(Relay4, OUTPUT);
+  
+  //During Starting all Relays should TURN OFF
+  //  digitalWrite(Relay1, HIGH);
+  //  digitalWrite(Relay2, HIGH);
+  digitalWrite(Relay3, HIGH);
+  digitalWrite(Relay4, HIGH);
+
+  /************* End Relay control *************/
 }
 
 void loop() {
