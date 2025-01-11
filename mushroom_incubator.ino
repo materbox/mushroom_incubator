@@ -138,18 +138,18 @@ void setTimeAlarms(int lOnHour=30, int lOnMin=0, int lOnSec=0, int lOffHour=0, i
 
 void setup() {
   Serial.begin(SERIAL_DEBUG_BAUD);
-  Serial.println("\n Starting");
-  Serial.println("Information- - TEST");
-  Serial.println("[ERROR]  TEST");
-  Serial.println("[INFO] TEST");  
+  while (!Serial) ; // wait for Arduino Serial Monitor
+  enqueueMessage("Starting", "INFO");
+  enqueueMessage("Test", "ERROR");
+  enqueueMessage("Test", "WARN");
 
   drd = new DoubleResetDetector(DRD_TIMEOUT, DRD_ADDRESS);
 
   if (drd->detectDoubleReset()) {
-      Serial.println("[INFO] Double Reset Detected");
+    enqueueMessage("Double Reset Detected", "INFO");
       DRD_DETECTED = true;
     } else {
-      Serial.println("[INFO] No Double Reset Detected");
+      enqueueMessage("No Double Reset Detected", "INFO");
       DRD_DETECTED = false;
     }
 
@@ -165,13 +165,14 @@ void setup() {
   pinMode(Relay3, OUTPUT);
   pinMode(Relay4, OUTPUT);
   
-  //During Starting all Relays should TURN OFF
+  //During Start all Relays should TURN OFF
   //  digitalWrite(Relay1, HIGH);
   //  digitalWrite(Relay2, HIGH);
   digitalWrite(Relay3, HIGH);
   digitalWrite(Relay4, HIGH);
 
   /************* End Relay control *************/
+
 }
 
 void loop() {
@@ -180,9 +181,9 @@ void loop() {
       if (!tb.connected()) {
         // Reconnect to the ThingsBoard server,
         // if a connection was disrupted or has not yet been established
-        Serial.printf("[INFO] Connecting to: (%s) with token (%s)\n", THINGSBOARD_SERVER, TOKEN);
+        enqueueMessage("Connecting to: " + String(THINGSBOARD_SERVER) + " with token " + String(TOKEN), "INFO");
         if (!tb.connect(THINGSBOARD_SERVER, TOKEN, THINGSBOARD_PORT)) {
-          Serial.println("[ERROR] Failed to connect");
+          enqueueMessage("Failed to connect", "ERROR");
           subscribed = false;
         }
       } else {
@@ -200,8 +201,7 @@ void loop() {
         sendTelemetryJson(getMqDataJson());
       }
     } else {
-      Serial.println("No Wifi");
-      Serial.println("WiFi.status() == WL_CONNECTED ..." + WiFi.status());
+      enqueueMessage("WiFi.status() == WL_CONNECTED " + String(WiFi.status()), "ERROR");
     }
     mtime = millis();
   }
@@ -215,8 +215,7 @@ void setupBh1750Sensor(){
   // For Wemos / Lolin D1 Mini Pro and the Ambient Light shield use Wire.begin(D2, D1);
 
   luxMeter.begin();
-
-  Serial.println(F("BH1750 Test begin"));
+  enqueueMessage("BH1750 Test begin", "INFO");
   BH1750_DETECTED = true;
 }
 
@@ -236,25 +235,23 @@ void setupMqSensor(){
   if (!json["ERROR"]){
   //if (json.containsKey("R0_VALUE")){
     calcR0 = json["R0_VALUE"];
-    Serial.print("Existe el archivo MQ135.txt con R0= ");
-    Serial.println(calcR0);
+    enqueueMessage("MQ load config calibration R0 = " + String(calcR0), "INFO");
   } else {
     calcR0 = mqSensorCalibration();
-    Serial.print("Se mandó a calibrar con R0= ");
-    Serial.println(calcR0);
+    enqueueMessage("MQ sensor calibration using R0 = " + String(calcR0), "INFO");
   }
 
   if(isinf(calcR0)) {
-    Serial.println("Warning: Conection issue, R0 is infinite (Open circuit detected) please check your wiring and supply");
+    enqueueMessage("R0 is infinite (Open circuit detected)", "ERROR");
     MQ_DETECTED = false;
     while(1);
   } else if(calcR0 == 0){
-    Serial.println("Warning: Conection issue found, R0 is zero (Analog pin shorts to ground) please check your wiring and supply");
+    enqueueMessage("R0 is zero (Analog pin shorts to ground)", "ERROR");
     MQ_DETECTED = false;
     while(1);
   } else {
-    MQ135.setR0(calcR0);
-    Serial.println("MQ135 sensor started");
+    MQ135.setR0(calcR0); // Se evita calibrar por valores muy distintos entre incubadoras
+    enqueueMessage("MQ135 sensor started", "INFO");
     MQ_DETECTED = true;
   }
 }
@@ -267,20 +264,18 @@ float mqSensorCalibration(){
   // We recomend executing this routine only on setup in laboratory conditions.
   // This routine does not need to be executed on each restart, you can load your R0 value from eeprom.
   // Acknowledgements: https://jayconsystems.com/blog/understanding-a-gas-sensor
-  Serial.print("Calibrating please wait.");
+  enqueueMessage("MQ135 sensor is being Calibrating, please wait", "INFO");
   float calcR0 = 0;
   for(int i = 1; i<=10; i ++)
   {
     MQ135.update(); // Update data, the arduino will read the voltage from the analog pin
     calcR0 += MQ135.calibrate(RatioMQ135CleanAir);
-    Serial.print(".");
   }
   calcR0 = calcR0/10;
   
   JsonDocument json;
   json["R0_VALUE"] = calcR0;
   saveData(json, MQ_DATA_FILE);
-  Serial.println("  done!.");
   /*****************************  MQ CAlibration ********************************************/ 
   return calcR0;
 }
@@ -288,16 +283,16 @@ float mqSensorCalibration(){
 void setupBme280Sensor(){
   BME280_DETECTED = bme.begin(0x76);  
   if (!BME280_DETECTED) {
-    Serial.println("Could not find a valid BME280 sensor!");
+    enqueueMessage("Could not find a valid BME280 sensor!", "ERROR");
   } else {
-    Serial.println("BME280 sensor started");
+    enqueueMessage("BME280 sensor started", "INFO");
   }
 }
 
 void sendTelemetryJson(const JsonVariantConst &data){
+  tb.sendTelemetryJson(data, Helper::Measure_Json(data));
   serializeJsonPretty(data, Serial);
   Serial.println();
-  tb.sendTelemetryJson(data, Helper::Measure_Json(data));
 }
 
 JsonDocument getBh1750DataJson(){
@@ -358,7 +353,7 @@ JsonDocument getBme280DataJson(){
 
 /************* RPC callbacks *************/
 void rpcSubscribe(){
-  Serial.println("Subscribing for RPC...");
+ enqueueMessage("Subscribing for RPC", "INFO");
 
   const std::array<RPC_Callback, 2U> callbacks = {
     RPC_Callback{ RPC_SET_HOURS_OF_LIGHT,                   processSetTimeAlarms},
@@ -369,10 +364,10 @@ void rpcSubscribe(){
   // processTemperatureChange() and processSwitchChange() functions,
   // as denoted by callbacks array.
   if (!tb.RPC_Subscribe(callbacks.cbegin(), callbacks.cend())) {
-    Serial.println("Failed to subscribe for RPC");
+    enqueueMessage("Failed to subscribe for RPC", "ERROR");
     return;
   }
-  Serial.println("Subscribe done");
+  enqueueMessage("Subscribe done", "INFO");
   subscribed = true;
 }
 
@@ -381,8 +376,8 @@ void rpcSubscribe(){
 /// See https://arduinojson.org/v5/api/jsonvariant/subscript/ for more details
 /// @param data Data containing the rpc data that was called and its current value
 /// @return Response that should be sent to the cloud. Useful for getMethods
-  Serial.println("Received the set temperature alarm RPC method");
 RPC_Response processSetTimeAlarms(const RPC_Data &data) {
+  enqueueMessage("Received RPC call SetTimeAlarms", "RCP");
 
   // Process data
   //Lights on time
@@ -414,6 +409,7 @@ RPC_Response processTimeToSendTelemetry(const RPC_Data &data) {
   //Lights on time
   TIME_TO_SEND_TELEMETRY = data["TIME_TO_SEND_TELEMETRY"];
   
+  enqueueMessage("Send telemetry every " + String(TIME_TO_SEND_TELEMETRY) + " seconds", "RCP");
   return RPC_Response(RPC_RESPONSE_KEY, 42);
 }
 
@@ -422,13 +418,12 @@ RPC_Response processTimeToSendTelemetry(const RPC_Data &data) {
 /// @param data Data containing the rpc response that was sent by the cloud
 void processTime(const JsonVariantConst &data) {
   time_t time = data["time"];
-  Serial.print("Time: ");
-  Serial.println(time);
   // Time Alarms
   setTime(time);
   SET_TIME = false;
   printActualTime();
 }
+
 /************* End RPC callbacks *************/
 
 /************* Wifi Manager *************/
@@ -508,16 +503,16 @@ void setupWifiManager(bool DRD_DETECTED){
   if(DRD_DETECTED || TEST_CP){
     Alarm.delay(1000);
     if(!wm.startConfigPortal("MaterBox IoT", "123456789")){
-      Serial.println("[INFO] Failed to connect and hit timeout");
+      enqueueMessage("Failed to connect and hit timeout", "INFO");
     } else {
-      Serial.println("[INFO] Wifi connected:)");
+      enqueueMessage("Wifi connected :)", "INFO");
       wifiInfo();
     }
   } else {
     if(!wm.autoConnect("MaterBox IoT", "123456789")){
-      Serial.println("[INFO] Failed to connect and hit timeout");
+      enqueueMessage("Failed to connect and hit timeout", "INFO");
     } else {
-      Serial.println("[INFO] Wifi connected:)");
+      enqueueMessage("Wifi connected :)", "INFO");
       wifiInfo();
     }
   }
@@ -534,23 +529,20 @@ void setupWifiManager(bool DRD_DETECTED){
     json["TOKEN"] = TOKEN;
     json["STAND_ALONE"] = STAND_ALONE;
     saveData(json, WM_DATA_FILE);
-    //saveConfigData();
   }
 }
 
 void saveWifiCallback(){
-  Serial.println("[CALLBACK] save settings Callback fired");
-
+  enqueueMessage("wm save settings Callback fired ", "INFO");
 }
 
 //gets called when WiFiManager enters configuration mode
 void configModeCallback (WiFiManager *myWiFiManager) {
-  Serial.println("[CALLBACK] configModeCallback fired");
-
+  enqueueMessage("wm config Mode Callback fired", "INFO");
 }
 
 void saveParamCallback(){
-  Serial.println("[CALLBACK] saveParamCallback fired");
+  enqueueMessage("wm save Parameters Callback fired", "INFO");
   SAVE_PARAMS = true;
 }
 
@@ -560,51 +552,53 @@ void bindServerCallback(){
 }
 
 void handleRoute(){
-  Serial.println("[HTTP] handle route");
   wm.server->send(200, "text/plain", "hello from user code");
+  enqueueMessage("wm handle route", "INFO");
 }
 
 void wifiInfo(){
   // can contain gargbage on esp32 if wifi is not ready yet
-  Serial.println("[WIFI] WIFI INFO DEBUG");
+  enqueueMessage("Wifi debug data", "INFO");
+
+  JsonDocument json;
+  json["SAVED"] = (String)(wm.getWiFiIsSaved() ? "YES" : "NO");
+  json["SSID"] = (String)wm.getWiFiSSID();
+  json["Password"] = (String)wm.getWiFiPass();
+  json["Hostname"] = (String)WiFi.getHostname();
+  
   // WiFi.printDiag(Serial);
-  Serial.println("[WIFI] SAVED: " + (String)(wm.getWiFiIsSaved() ? "YES" : "NO"));
-  Serial.println("[WIFI] SSID: " + (String)wm.getWiFiSSID());
-  Serial.println("[WIFI] PASS: " + (String)wm.getWiFiPass());
-  Serial.println("[WIFI] HOSTNAME: " + (String)WiFi.getHostname());
+  enqueueMessageJson(json, "INFO", true);
 }
 /************* End Wifi Manager *************/
 // Save data to eeprom in the specific file
 void saveData(JsonDocument json, String fileName) {
-      printConfigInfo("Saving data");
+      enqueueMessage("Saving data", "INFO");
       File dataFile = LittleFS.open("/" + fileName, "w");
       if (!dataFile) {
-        Serial.println("failed to open config file for writing");
+        enqueueMessage("failed to open " + fileName + " for writing", "ERROR");
       } else {
-        serializeJson(json, dataFile);     
+        serializeJson(json, dataFile);
       }
       dataFile.close();
-      Serial.println();
 }
 
 JsonDocument loadData(String fileName) {
+  enqueueMessage("Mounting " + fileName, "INFO");
   JsonDocument json;
   //https://www.hackster.io/Neutrino-1/littlefs-read-write-delete-using-esp8266-and-arduino-ide-867180
   //read file from FileSistem
   if(!LittleFS.begin()){
-    Serial.println("An Error has occurred while mounting LittleFS");
-    //Print the error on display
-    Serial.println("Mounting Error");
+    enqueueMessage("Mounting file", "ERROR");
     Alarm.delay(1000);
     json["ERROR"] = true;
   } else {
-    Serial.println("mounted file system");
+    enqueueMessage("Mounted file system", "INFO");
     if (LittleFS.exists("/" + fileName)) {
       //file exists, reading and loading
-      Serial.println("reading config file");
+      enqueueMessage("reading " + fileName, "INFO");
       File dataFile = LittleFS.open("/" + fileName, "r");
       if (dataFile) {
-        Serial.println("opened data file");
+        enqueueMessage("Opened " + fileName, "INFO");
         size_t size = dataFile.size();
         
         // Allocate a buffer to store contents of the file.
@@ -612,12 +606,12 @@ JsonDocument loadData(String fileName) {
         dataFile.readBytes(buf.get(), size);
         auto deserializeError = deserializeJson(json, buf.get());
         dataFile.close();
-        json["ERROR"] = false;
 
         if (!deserializeError) {
-          printConfigInfo("Data loaded");
+          enqueueMessage("Data loaded", "INFO");
+          json["ERROR"] = false;
         } else {
-          Serial.println("failed to load data file");
+          enqueueMessage("failed to load " + fileName, "ERROR");
           json["ERROR"] = true;
         }
       }
@@ -628,12 +622,24 @@ JsonDocument loadData(String fileName) {
   return json;
 }
 
-void printConfigInfo(String FROM){
-  Serial.println("[INFO] Print data fired from: " + FROM);
-  Serial.println("\tthingsboard server: " + String(THINGSBOARD_SERVER));
-  Serial.println("\ttoken: " + String(TOKEN));
-  Serial.print("\tstand_alone: ");
-  Serial.println((STAND_ALONE) ? "true" : "false");
+void enqueueMessage(String message, String Type){
+  Serial.print("[");
+  Serial.print(Type);
+  Serial.print("] ");
+  Serial.println(message);
+}
+
+void enqueueMessageJson(JsonDocument json, String Type, bool Pretty){
+  Serial.print("[");
+  Serial.print(Type);
+  Serial.print("] ");
+  if(Pretty){
+    serializeJsonPretty(json, Serial);
+  } else {
+    serializeJson(json, Serial);
+  }
+  
+  Serial.println();
 }
 
 void deleteFileData(String fileName){
@@ -651,19 +657,20 @@ void getDeviceId(byte macAddressArray[], unsigned int len, char buffer[]){
     buffer[len*2] = '\0';
 }
 
-  Serial.println("[RPC] request time from server...");
-  const RPC_Request_Callback callback(RPC_REQUEST_CALLBACK_METHOD_NAME, &processTime);
 void setLocalTime(){
+  enqueueMessage("Request time from server", "RPC");
   const RPC_Request_Callback callback(RPC_REQUEST_GET_CURRENT_TIME, &processTime);
   // Perform a request of the given RPC method. Optional responses are handled in processTime
   if (!tb.RPC_Request(callback)) {
-    Serial.println("Failed to request for RPC");
+    enqueueMessage("Failed to request for RPC", "ERROR");
   } else {
-    Serial.println("Request done");
+    enqueueMessage("Request done", "INFO");
     SET_TIME = false;
   }
 }
 
+void printActualTime(){
+  enqueueMessage("Time: " + String(hour()) + ":" + String(minute()) + ":" + String(second()), "INFO");
 }
 
 void setTimeAlarms(int lOnHour, int lOnMin, int lOnSec, int lOffHour, int lOffMin, int lOffSec){
@@ -685,6 +692,7 @@ void setTimeAlarms(int lOnHour, int lOnMin, int lOnSec, int lOffHour, int lOffMi
       lOffHour= json["lOffHour"];
       lOffMin = json["lOffMin"];
       lOffSec = json["lOffSec"];
+      enqueueMessage("Setting alarms from lights control data file", "INFO");
     } else {
       //Lights on time
       lOnHour = 6;
@@ -695,8 +703,10 @@ void setTimeAlarms(int lOnHour, int lOnMin, int lOnSec, int lOffHour, int lOffMi
       lOffHour= 14;
       lOffMin = 0;
       lOffSec = 0;
+      enqueueMessage("Setting alarms from default values", "INFO");
     }
   } else {
+      enqueueMessage("Setting alarms from RPC call", "INFO");
       //Lights on time
       json["lOnHour"] = lOnHour;
       json["lOnMin"] = lOnMin;
@@ -706,34 +716,40 @@ void setTimeAlarms(int lOnHour, int lOnMin, int lOnSec, int lOffHour, int lOffMi
       json["lOffHour"] = lOffHour;
       json["lOffMin"] = lOffMin;
       json["lOffSec"] = lOffSec;
+      enqueueMessage("Saving alarms info to ligths control data file", "INFO");
       saveData(json, LIGHTS_CONTROL_DATA_FILE);
   }
   ALARM_ID_ON = Alarm.alarmRepeat(lOnHour, lOnMin, lOnSec, turnLightsOn);
+  enqueueMessage("Encender: " + String(lOnHour) + ":" + String(lOnMin) + ":" + String(lOnSec), "INFO");
 
   ALARM_ID_OFF = Alarm.alarmRepeat(lOffHour, lOffMin, lOffSec, turnLightsOff);
+  enqueueMessage("Apagar: " + String(lOffHour) + ":" + String(lOffMin) + ":" + String(lOffSec), "INFO");
 
 //  Alarm.timerRepeat(15, Repeats);           // timer for every 15 seconds
   if(ALARM_ID_ON == 255 || ALARM_ID_OFF == 255){
+    enqueueMessage("Alarms not set. Try again", "WARN");
     Alarm.free(ALARM_ID_ON);
     Alarm.free(ALARM_ID_OFF);
     ALARMS_ARE_SET = false;
     SET_ALARMS = true;
   } else {
+    enqueueMessage("Alarm ON set. Id: " + String(ALARM_ID_ON), "INFO");
+    enqueueMessage("Alarm OFF set. Id: " + String(ALARM_ID_OFF), "INFO");
     ALARMS_ARE_SET = true;
     SET_ALARMS = false;
   }
 }
 
 void turnLightsOn(){
-  Serial.println("Alarm: - turn lights on");
+  enqueueMessage("Triggered turn lights on alarm", "INFO");
   digitalWrite(Relay3, LOW);
-  tb.sendTelemetryData("lights", 1);
+  //tb.sendTelemetryData("lights", 1);
 }
 
 void turnLightsOff(){
-  Serial.println("Alarm: - turn lights off");
+  enqueueMessage("Triggered turn lights off alarm", "INFO");
   digitalWrite(Relay3, HIGH);
-  tb.sendTelemetryData("lights", 0);
+  //tb.sendTelemetryData("lights", 0);
 }
 
 struct tm getTime() {
