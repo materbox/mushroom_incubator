@@ -629,15 +629,6 @@ void setTime(){
   }
 }
 
-void setTimeAlarms(){
-  Serial.println("Setting alarms time");
-  // create the alarms, to trigger at specific times
-  // 8:00pm every day (8,30,0, MorningAlarm)
-  Alarm.alarmRepeat(atoi(lOnHour),atoi(lOnMin),atoi(lOnSec), turnLightsOn);
-  Alarm.alarmRepeat(atoi(lOffHour),atoi(lOffMin),atoi(lOffSec), turnLightsOff);
-  Alarm.timerRepeat(15, Repeats);           // timer for every 15 seconds
-  SET_ALARMS = false;
-
 }
 
 void Repeats() {
