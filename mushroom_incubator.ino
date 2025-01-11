@@ -14,6 +14,7 @@ constexpr uint32_t SERIAL_DEBUG_BAUD = 115200U;
 #define CURRENT_FIRMWARE_VERSION  "0.1.0"
 const char* deviceName            = "MB-Mushroom-Incubator";
 unsigned long mtime               = 0;
+int TIME_TO_SEND_TELEMETRY  = 30; //every x seconds to send tellemetry
 /************* End Define default values *************/
 
 /************* Double Reset config *************/
@@ -45,6 +46,10 @@ constexpr uint16_t MAX_MESSAGE_SIZE = 256U;
 // RPC
 // Statuses for subscribing to rpc
 bool subscribed = false;
+constexpr char RPC_RESPONSE_KEY[] = "RPC_RESPONSE_KEY";
+constexpr char RPC_REQUEST_GET_CURRENT_TIME[] = "getCurrentTime";
+constexpr const char RPC_SET_HOURS_OF_LIGHT[] = "setHoursOfLight";
+constexpr const char RPC_TIME_TO_SEND_TELEMETRY[] = "timeToSendTelemetry";
 
 WiFiClient espClient;
 // Initalize the Mqtt client instance
@@ -72,7 +77,14 @@ bool SAVE_PARAMS     = false;
 /************* End Wifi Manager *************/
 
 /************* Lights control *************/
+String LIGHTS_CONTROL_DATA_FILE = "lights.txt";
+
 //Time Alarms
+bool SET_TIME     = true;
+bool SET_ALARMS   = true;
+bool ALARMS_ARE_SET = false;
+int ALARM_ID_ON;
+int ALARM_ID_OFF;
 
 /************* Relay control *************/
 bool state = false;
@@ -119,6 +131,10 @@ String MQ_DATA_FILE = "mqdata.txt";
 //Declare Sensor
 MQUnifiedsensor MQ135(BOARD, VOLTAGE_RESOLUTION, ADC_BIT_RESOLUTION, MQ_ANALOG_PIN, MQ_TYPE);
 /************* End Sensor MQ-series *************/
+
+/************* Prototype functions *************/
+void setTimeAlarms(int lOnHour=30, int lOnMin=0, int lOnSec=0, int lOffHour=0, int lOffMin=0, int lOffSec=0);
+/************* End Prototype functions *************/
 
 void setup() {
   Serial.begin(SERIAL_DEBUG_BAUD);
@@ -170,11 +186,14 @@ void loop() {
           subscribed = false;
         }
       } else {
-          if (!subscribed) {
+        if (!subscribed) {
             rpcSubscribe();
         }
-        if (SET_TIME){
-          setTime();
+        if (SET_TIME){ //Get current time if not set
+          setLocalTime();
+        }
+        if(SET_ALARMS){ //Set hours of light
+          setTimeAlarms();
         }
         sendTelemetryJson(getBh1750DataJson());
         sendTelemetryJson(getBme280DataJson());
@@ -342,6 +361,8 @@ void rpcSubscribe(){
   Serial.println("Subscribing for RPC...");
 
   const std::array<RPC_Callback, 2U> callbacks = {
+    RPC_Callback{ RPC_SET_HOURS_OF_LIGHT,                   processSetTimeAlarms},
+    RPC_Callback{ RPC_TIME_TO_SEND_TELEMETRY,               processTimeToSendTelemetry}
   };
 
   // Perform a subscription. All consequent data processing will happen in
@@ -355,26 +376,44 @@ void rpcSubscribe(){
   subscribed = true;
 }
 
-/// @brief Processes function for RPC call "set_temperature_alarm"
+/// @brief Processes function for RPC call "SetTimeAlarms"
 /// RPC_Data is a JSON variant, that can be queried using operator[]
 /// See https://arduinojson.org/v5/api/jsonvariant/subscript/ for more details
 /// @param data Data containing the rpc data that was called and its current value
 /// @return Response that should be sent to the cloud. Useful for getMethods
-RPC_Response processTemperatureAlarm(const RPC_Data &data) {
   Serial.println("Received the set temperature alarm RPC method");
+RPC_Response processSetTimeAlarms(const RPC_Data &data) {
 
   // Process data
+  //Lights on time
+  int lOnHour = data["lOnHour"];
+  int lOnMin  = data["lOnMin"];
+  int lOnSec  = data["lOnSec"];
+  
+  //Lights off time
+  int lOffHour = data["lOffHour"];
+  int lOffMin  = data["lOffMin"];
+  int lOffSec  = data["lOffSec"];
+  
+  printActualTime();
+
+  setTimeAlarms(lOnHour, lOnMin, lOnSec, lOffHour, lOffMin, lOffSec);
+
   return RPC_Response(RPC_RESPONSE_KEY, 42);
 }
 
+/// @brief Processes function for RPC call "SetTimeAlarms"
 /// RPC_Data is a JSON variant, that can be queried using operator[]
 /// See https://arduinojson.org/v5/api/jsonvariant/subscript/ for more details
 /// @param data Data containing the rpc data that was called and its current value
 /// @return Response that should be sent to the cloud. Useful for getMethods
-RPC_Response processCo2Alarm(const RPC_Data &data) {
-  Serial.println("Received the set CO2 alarm RPC method");
+RPC_Response processTimeToSendTelemetry(const RPC_Data &data) {
+  enqueueMessage("Received timeToSendTelemetry method", "RCP");
 
   // Process data
+  //Lights on time
+  TIME_TO_SEND_TELEMETRY = data["TIME_TO_SEND_TELEMETRY"];
+  
   return RPC_Response(RPC_RESPONSE_KEY, 42);
 }
 
@@ -386,14 +425,9 @@ void processTime(const JsonVariantConst &data) {
   Serial.print("Time: ");
   Serial.println(time);
   // Time Alarms
-  setTime (time);
-  // (hour(24 format),minutes,seconds,month,day,year) set time to Saturday 8:29:00am Jan 1 2024
-  //setTime(timeinfo.tm_hour,timeinfo.tm_min,timeinfo.tm_sec,timeinfo.tm_mon,timeinfo.tm_mday,timeinfo.tm_year + 1900);+
-
+  setTime(time);
   SET_TIME = false;
-  if(SET_ALARMS){
-    setTimeAlarms();
-  }
+  printActualTime();
 }
 /************* End RPC callbacks *************/
 
@@ -617,9 +651,10 @@ void getDeviceId(byte macAddressArray[], unsigned int len, char buffer[]){
     buffer[len*2] = '\0';
 }
 
-void setTime(){
   Serial.println("[RPC] request time from server...");
   const RPC_Request_Callback callback(RPC_REQUEST_CALLBACK_METHOD_NAME, &processTime);
+void setLocalTime(){
+  const RPC_Request_Callback callback(RPC_REQUEST_GET_CURRENT_TIME, &processTime);
   // Perform a request of the given RPC method. Optional responses are handled in processTime
   if (!tb.RPC_Request(callback)) {
     Serial.println("Failed to request for RPC");
@@ -631,14 +666,61 @@ void setTime(){
 
 }
 
-void Repeats() {
-  Serial.println("15 second timer");
-  if (!state){
-    digitalWrite(Relay3, LOW);
-    state = true;
+void setTimeAlarms(int lOnHour, int lOnMin, int lOnSec, int lOffHour, int lOffMin, int lOffSec){
+  if (ALARMS_ARE_SET){  
+    Alarm.free(ALARM_ID_ON);
+    Alarm.free(ALARM_ID_OFF);
+  }
+  bool SAVE_DATA =  false;
+  JsonDocument json;
+  if (lOnHour == 30){
+    json = loadData(LIGHTS_CONTROL_DATA_FILE);
+    if (!json["ERROR"]){
+      //Lights on time
+      lOnHour = json["lOnHour"];
+      lOnMin  = json["lOnMin"];
+      lOnSec  = json["lOnSec"];
+      
+      //Lights off time
+      lOffHour= json["lOffHour"];
+      lOffMin = json["lOffMin"];
+      lOffSec = json["lOffSec"];
+    } else {
+      //Lights on time
+      lOnHour = 6;
+      lOnMin  = 0;
+      lOnSec  = 0;
+      
+      //Lights off time
+      lOffHour= 14;
+      lOffMin = 0;
+      lOffSec = 0;
+    }
   } else {
-    digitalWrite(Relay3, HIGH);
-    state = false;
+      //Lights on time
+      json["lOnHour"] = lOnHour;
+      json["lOnMin"] = lOnMin;
+      json["lOnSec"] = lOnSec;
+
+      //Lights off time
+      json["lOffHour"] = lOffHour;
+      json["lOffMin"] = lOffMin;
+      json["lOffSec"] = lOffSec;
+      saveData(json, LIGHTS_CONTROL_DATA_FILE);
+  }
+  ALARM_ID_ON = Alarm.alarmRepeat(lOnHour, lOnMin, lOnSec, turnLightsOn);
+
+  ALARM_ID_OFF = Alarm.alarmRepeat(lOffHour, lOffMin, lOffSec, turnLightsOff);
+
+//  Alarm.timerRepeat(15, Repeats);           // timer for every 15 seconds
+  if(ALARM_ID_ON == 255 || ALARM_ID_OFF == 255){
+    Alarm.free(ALARM_ID_ON);
+    Alarm.free(ALARM_ID_OFF);
+    ALARMS_ARE_SET = false;
+    SET_ALARMS = true;
+  } else {
+    ALARMS_ARE_SET = true;
+    SET_ALARMS = false;
   }
 }
 
