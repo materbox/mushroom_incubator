@@ -14,7 +14,6 @@ constexpr uint32_t SERIAL_DEBUG_BAUD = 115200U;
 #define CURRENT_FIRMWARE_VERSION  "0.1.0"
 const char* deviceName            = "MB-Mushroom-Incubator";
 unsigned long mtime               = 0;
-const int TIME_TO_SEND_TELEMETRY  = 30; //every x seconds to send tellemetry
 /************* End Define default values *************/
 
 /************* Double Reset config *************/
@@ -46,17 +45,6 @@ constexpr uint16_t MAX_MESSAGE_SIZE = 256U;
 // RPC
 // Statuses for subscribing to rpc
 bool subscribed = false;
-constexpr const char RPC_TEMPERATURE_METHOD[] = "example_set_temperature";
-constexpr const char RPC_SWITCH_METHOD[] = "example_set_switch";
-
-constexpr const char RPC_TEMPERATURE_ALARM_MANAGEMENT_METHOD[] = "set_temperature_alarm";
-constexpr const char RPC_CO2_ALARM_MANAGEMENT_METHOD[] = "set_co2_alarm";
-constexpr const char RPC_ALARM_STATE_KEY[] = "state";
-
-constexpr const char RPC_TEMPERATURE_KEY[] = "temp";
-constexpr const char RPC_SWITCH_KEY[] = "switch";
-constexpr const char RPC_RESPONSE_KEY[] = "example_response";
-constexpr char RPC_REQUEST_CALLBACK_METHOD_NAME[] = "getCurrentTime";
 
 WiFiClient espClient;
 // Initalize the Mqtt client instance
@@ -85,17 +73,6 @@ bool SAVE_PARAMS     = false;
 
 /************* Lights control *************/
 //Time Alarms
-bool SET_TIME   = true;
-bool SET_ALARMS = true;
-
-//Lights on time
-char lOnHour[]   = "6";
-char lOnMin[]    = "0";
-char lOnSec[]    = "0";
-//Lights off time
-char lOffHour[]  = "14";
-char lOffMin[]   = "0";
-char lOffSec[]   = "0";
 
 /************* Relay control *************/
 bool state = false;
@@ -365,8 +342,6 @@ void rpcSubscribe(){
   Serial.println("Subscribing for RPC...");
 
   const std::array<RPC_Callback, 2U> callbacks = {
-    RPC_Callback{ RPC_TEMPERATURE_ALARM_MANAGEMENT_METHOD,  processTemperatureAlarm },
-    RPC_Callback{ RPC_CO2_ALARM_MANAGEMENT_METHOD,          processCo2Alarm }
   };
 
   // Perform a subscription. All consequent data processing will happen in
@@ -389,17 +364,9 @@ RPC_Response processTemperatureAlarm(const RPC_Data &data) {
   Serial.println("Received the set temperature alarm RPC method");
 
   // Process data
-  const int state = data[RPC_ALARM_STATE_KEY];
-  if (state){
-    Serial.println("Alarma de temperatura creada");
-  }
-  if (!state){
-    Serial.println("Alarma de temperatura borrada");
-  }
   return RPC_Response(RPC_RESPONSE_KEY, 42);
 }
 
-/// @brief Processes function for RPC call "set_co2_alarm"
 /// RPC_Data is a JSON variant, that can be queried using operator[]
 /// See https://arduinojson.org/v5/api/jsonvariant/subscript/ for more details
 /// @param data Data containing the rpc data that was called and its current value
@@ -408,13 +375,6 @@ RPC_Response processCo2Alarm(const RPC_Data &data) {
   Serial.println("Received the set CO2 alarm RPC method");
 
   // Process data
-  const int state = data[RPC_ALARM_STATE_KEY];
-  if (state){
-    Serial.println("Alarma de CO2 creada");
-  }
-  if (!state){
-    Serial.println("Alarma de CO2 borrada");
-  }
   return RPC_Response(RPC_RESPONSE_KEY, 42);
 }
 
@@ -463,14 +423,6 @@ void setupWifiManager(bool DRD_DETECTED){
     //strcpy(THINGSBOARD_PORT, json["THINGSBOARD_PORT"]);
     strcpy(TOKEN, json["TOKEN"]);
     STAND_ALONE = json["STAND_ALONE"];
-    //Lights on time
-    strcpy(lOnHour, json["lOnHour"]);
-    strcpy(lOnMin, json["lOnMin"]);
-    strcpy(lOnSec, json["lOnSec"]);
-    //Lights off time
-    strcpy(lOffHour, json["lOffHour"]);
-    strcpy(lOffMin, json["lOffMin"]);
-    strcpy(lOffSec, json["lOffSec"]);
   }
 
   WiFiManagerParameter custom_server("server", "MaterBox server", THINGSBOARD_SERVER, 40);
@@ -478,16 +430,6 @@ void setupWifiManager(bool DRD_DETECTED){
   WiFiManagerParameter custom_api_token("apikey", "Token", TOKEN, 32);
   WiFiManagerParameter device_type("devicetype", "Tipo", deviceName, 40, " readonly");
   WiFiManagerParameter device_id("deviceid", "Device Id", deviceid, 40, " readonly");
-
-  //Lights on time
-  WiFiManagerParameter custom_lights_on_hour("houron", "Encender: Hora", lOnHour, 4);
-  WiFiManagerParameter custom_lights_on_min("minon", "Encender: Minuto", lOnMin, 4);
-  WiFiManagerParameter custom_lights_on_sec("secon", "Encender: Segundo", lOnSec, 4);
-
-  //Lights off time
-  WiFiManagerParameter custom_lights_off_hour("houroff", "Apagar: Hora", lOffHour, 4);
-  WiFiManagerParameter custom_lights_off_min("minoff", "Apagar: Minuto", lOffMin, 4);
-  WiFiManagerParameter custom_lights_off_sec("secoff", "Apagar: Segundo", lOffSec, 4);
 
   // callbacks
   wm.setAPCallback(configModeCallback);
@@ -501,16 +443,6 @@ void setupWifiManager(bool DRD_DETECTED){
   wm.addParameter(&custom_api_token);
   wm.addParameter(&device_type);
   wm.addParameter(&device_id);
-
-  //Lights on time
-  wm.addParameter(&custom_lights_on_hour);
-  wm.addParameter(&custom_lights_on_min);
-  wm.addParameter(&custom_lights_on_sec);
-
-  //Lights off time
-  wm.addParameter(&custom_lights_off_hour);
-  wm.addParameter(&custom_lights_off_min);
-  wm.addParameter(&custom_lights_off_sec);
 
   // invert theme, dark
   wm.setDarkMode(true);
@@ -561,31 +493,12 @@ void setupWifiManager(bool DRD_DETECTED){
   strcpy(TOKEN, custom_api_token.getValue());
   //strcpy(THINGSBOARD_PORT, custom_mqtt_port.getValue());
 
-  //Lights on time
-  strcpy(lOnHour, custom_lights_on_hour.getValue());
-  strcpy(lOnMin, custom_lights_on_min.getValue());
-  strcpy(lOnSec, custom_lights_on_sec.getValue());
-
-  //Lights off time
-  strcpy(lOffHour, custom_lights_off_hour.getValue());
-  strcpy(lOffMin, custom_lights_off_min.getValue());
-  strcpy(lOffSec, custom_lights_off_sec.getValue());
-
   if (SAVE_PARAMS){
     JsonDocument json;
     json["THINGSBOARD_SERVER"] = THINGSBOARD_SERVER;
     //json["mqtt_port"] = mqtt_port;
     json["TOKEN"] = TOKEN;
     json["STAND_ALONE"] = STAND_ALONE;
-    //Lights on time
-    json["lOnHour"] = lOnHour;
-    json["lOnMin"] = lOnMin;
-    json["lOnSec"] = lOnSec;
-    //Lights off time
-    json["lOffHour"] = lOffHour;
-    json["lOffMin"] = lOffMin;
-    json["lOffSec"] = lOffSec;
-
     saveData(json, WM_DATA_FILE);
     //saveConfigData();
   }
