@@ -1,17 +1,15 @@
 /************* Includes *************/
-#include <FS.h>
+#include <MaterBox.h>
 #include <WiFiManager.h> // https://github.com/tzapu/WiFiManager
 //#include <time.h>
 #include <TimeLib.h>
 #include <TimeAlarms.h>  // 
-#include <stdio.h>
-#include <LittleFS.h>             //https://github.com/esp8266/Arduino/tree/master/libraries/LittleFS
 /************* End Includes *************/
 
 /************* Define default values *************/
 constexpr uint32_t SERIAL_DEBUG_BAUD = 115200U;
-#define CURRENT_FIRMWARE_TITLE    "MB-MushroomIncubator"
-#define CURRENT_FIRMWARE_VERSION  "0.1.0"
+constexpr char CURRENT_FIRMWARE_TITLE[] = "MB-MushroomIncubator";
+constexpr char CURRENT_FIRMWARE_VERSION[] = "0.1.0";
 const char* deviceName            = "MB-Mushroom-Incubator";
 unsigned long mtime               = 0;
 int TIME_TO_SEND_TELEMETRY  = 30; //every x seconds to send tellemetry
@@ -34,28 +32,62 @@ DoubleResetDetector* drd;
 #define THINGSBOARD_ENABLE_PROGMEM 0  // Disable PROGMEM because the ESP8266WiFi library, does not support flash strings.
 //#define THINGSBOARD_ENABLE_STREAM_UTILS 1 // Enables sending messages that are bigger than the predefined message size
 //#define THINGSBOARD_ENABLE_DYNAMIC 1
+//#define THINGSBOARD_ENABLE_PSRAM 0
+
 #include <Arduino_MQTT_Client.h>
+#include <OTA_Firmware_Update.h>
+#include <Server_Side_RPC.h>
+#include <Client_Side_RPC.h>
 #include <ThingsBoard.h>          //https://github.com/thingsboard/thingsboard-arduino-sdk
 
 char THINGSBOARD_SERVER[40] = "materbox.io";
 char TOKEN[40] = "TEST_TOKEN";
-
 constexpr uint16_t THINGSBOARD_PORT = 1883U;
-// Maximum size packets will ever be sent or received by the underlying MQTT client
-constexpr uint16_t MAX_MESSAGE_SIZE = 256U;
+
+// Maximum size packets will ever be sent or received by the underlying MQTT client,
+// if the size is to small messages might not be sent or received messages will be discarded
+constexpr uint16_t MAX_MESSAGE_SEND_SIZE = 512U;
+constexpr uint16_t MAX_MESSAGE_RECEIVE_SIZE = 512U;
+
 // RPC
 // Statuses for subscribing to rpc
 bool subscribed = false;
-constexpr char RPC_RESPONSE_KEY[] = "RPC_RESPONSE_KEY";
+
 constexpr char RPC_REQUEST_GET_CURRENT_TIME[] = "getCurrentTime";
 constexpr const char RPC_SET_HOURS_OF_LIGHT[] = "setHoursOfLight";
 constexpr const char RPC_TIME_TO_SEND_TELEMETRY[] = "timeToSendTelemetry";
+constexpr uint8_t MAX_RPC_SUBSCRIPTIONS = 3U;
+constexpr uint8_t MAX_RPC_RESPONSE = 5U;
+constexpr uint8_t MAX_RPC_REQUEST = 5U;
+constexpr uint64_t REQUEST_TIMEOUT_MICROSECONDS = 5000U * 1000U;
+
+// OTA
+// Maximum amount of retries we attempt to download each firmware chunck over MQTT
+constexpr uint8_t FIRMWARE_FAILURE_RETRIES = 12U;
+
+// Size of each firmware chunck downloaded over MQTT,
+// increased packet size, might increase download speed
+constexpr uint16_t FIRMWARE_PACKET_SIZE = 4096U;
+// Statuses for updating
+bool currentFWSent = false;
+bool updateRequestSent = false;
 
 WiFiClient espClient;
 // Initalize the Mqtt client instance
 Arduino_MQTT_Client mqttClient(espClient);
+
+// Initialize used apis
+OTA_Firmware_Update<> ota;
+Server_Side_RPC<MAX_RPC_SUBSCRIPTIONS, MAX_RPC_RESPONSE> rpc;
+Client_Side_RPC<MAX_RPC_SUBSCRIPTIONS, MAX_RPC_REQUEST> rpc_request;
+const std::array<IAPI_Implementation*, 3U> apis = {
+  &rpc,
+  &rpc_request,
+  &ota
+};
+
 // Initialize ThingsBoard instance with the maximum needed buffer size
-ThingsBoard tb(mqttClient, MAX_MESSAGE_SIZE);
+ThingsBoard tb(mqttClient, MAX_MESSAGE_RECEIVE_SIZE, MAX_MESSAGE_SEND_SIZE, Default_Max_Stack_Size, apis);
 /************* End Thingsboard *************/
 
 /************* Wifi Manager *************/
@@ -95,7 +127,7 @@ bool state = false;
 #define Relay4 12  // GPIO12-D6    azul
 
 // Helper macro to calculate array size
-#define COUNT_OF(x) ((sizeof(x)/sizeof(0[x])) / ((size_t)(!(sizeof(x) % sizeof(0[x])))))
+//#define COUNT_OF(x) ((sizeof(x)/sizeof(0[x])) / ((size_t)(!(sizeof(x) % sizeof(0[x])))))
 
 /************* End Relay control *************/
 /************* End Lights control *************/
@@ -108,7 +140,7 @@ bool BH1750_DETECTED = false;
 /************* End Sensor BH1750 *************/
 
 /************* Sensor BME280 *************/
-#include <Wire.h>
+//#include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
 #define SEALEVELPRESSURE_HPA (1013.25)
@@ -117,9 +149,9 @@ bool BME280_DETECTED = false;
 /************* End Sensor BME280 *************/
 
 /************* Sensor MQ-series *************/
+String MQ_DATA_FILE = "mqdata.txt";
 bool MQ_DETECTED = false;
 bool MQ_DATA_DELETE  = false; // delete MQ_DATA_FILE - for testing
-String MQ_DATA_FILE = "mqdata.txt";
 #define BOARD "ESP8266"
 #define VOLTAGE_RESOLUTION 5
 #define MQ_ANALOG_PIN A0 //Analog input 0 of your arduino
@@ -132,6 +164,7 @@ String MQ_DATA_FILE = "mqdata.txt";
 MQUnifiedsensor MQ135(BOARD, VOLTAGE_RESOLUTION, ADC_BIT_RESOLUTION, MQ_ANALOG_PIN, MQ_TYPE);
 /************* End Sensor MQ-series *************/
 
+MATERBOX mb;
 /************* Prototype functions *************/
 void setTimeAlarms(int lOnHour=30, int lOnMin=0, int lOnSec=0, int lOffHour=0, int lOffMin=0, int lOffSec=0);
 /************* End Prototype functions *************/
@@ -139,40 +172,29 @@ void setTimeAlarms(int lOnHour=30, int lOnMin=0, int lOnSec=0, int lOffHour=0, i
 void setup() {
   Serial.begin(SERIAL_DEBUG_BAUD);
   while (!Serial) ; // wait for Arduino Serial Monitor
-  enqueueMessage("Starting", "INFO");
-  enqueueMessage("Test", "ERROR");
-  enqueueMessage("Test", "WARN");
+  mb.enqueueMessage("Starting", "INFO");
+  mb.enqueueMessage("Test", "ERROR");
+  mb.enqueueMessage("Test", "WARN");
 
   drd = new DoubleResetDetector(DRD_TIMEOUT, DRD_ADDRESS);
 
   if (drd->detectDoubleReset()) {
-    enqueueMessage("Double Reset Detected", "INFO");
+    mb.enqueueMessage("Double Reset Detected", "INFO");
       DRD_DETECTED = true;
     } else {
-      enqueueMessage("No Double Reset Detected", "INFO");
+      mb.enqueueMessage("No Double Reset Detected", "INFO");
       DRD_DETECTED = false;
     }
 
+  mb.begin();
   setupWifiManager(DRD_DETECTED);
 
   setupBh1750Sensor();
   setupBme280Sensor();
   setupMqSensor();
+  setupRelay();
 
-  /************* Relay control *************/
-  //  pinMode(Relay1, OUTPUT);
-  //  pinMode(Relay2, OUTPUT);
-  pinMode(Relay3, OUTPUT);
-  pinMode(Relay4, OUTPUT);
-  
-  //During Start all Relays should TURN OFF
-  //  digitalWrite(Relay1, HIGH);
-  //  digitalWrite(Relay2, HIGH);
-  digitalWrite(Relay3, HIGH);
-  digitalWrite(Relay4, HIGH);
-
-  /************* End Relay control *************/
-
+  mtime = TIME_TO_SEND_TELEMETRY * 1000;
 }
 
 void loop() {
@@ -181,9 +203,9 @@ void loop() {
       if (!tb.connected()) {
         // Reconnect to the ThingsBoard server,
         // if a connection was disrupted or has not yet been established
-        enqueueMessage("Connecting to: " + String(THINGSBOARD_SERVER) + " with token " + String(TOKEN), "INFO");
+        mb.enqueueMessage("Connecting to: " + String(THINGSBOARD_SERVER) + " with token " + String(TOKEN), "INFO");
         if (!tb.connect(THINGSBOARD_SERVER, TOKEN, THINGSBOARD_PORT)) {
-          enqueueMessage("Failed to connect", "ERROR");
+          mb.enqueueMessage("Failed to connect", "ERROR");
           subscribed = false;
         }
       } else {
@@ -196,12 +218,18 @@ void loop() {
         if(SET_ALARMS){ //Set hours of light
           setTimeAlarms();
         }
-        sendTelemetryJson(getBh1750DataJson());
-        sendTelemetryJson(getBme280DataJson());
-        sendTelemetryJson(getMqDataJson());
+        if (BH1750_DETECTED){
+          sendTelemetryJson(getBh1750DataJson());
+        }
+        if (BME280_DETECTED){
+          sendTelemetryJson(getBme280DataJson());
+        }
+        if (MQ_DETECTED){
+          sendTelemetryJson(getMqDataJson());
+        }
       }
     } else {
-      enqueueMessage("WiFi.status() == WL_CONNECTED " + String(WiFi.status()), "ERROR");
+      mb.enqueueMessage("WiFi.status() == WL_CONNECTED " + String(WiFi.status()), "ERROR");
     }
     mtime = millis();
   }
@@ -213,15 +241,17 @@ void setupBh1750Sensor(){
   Wire.begin();
   // On esp8266 you can select SCL and SDA pins using Wire.begin(D4, D3);
   // For Wemos / Lolin D1 Mini Pro and the Ambient Light shield use Wire.begin(D2, D1);
-
-  luxMeter.begin();
-  enqueueMessage("BH1750 Test begin", "INFO");
-  BH1750_DETECTED = true;
+  BH1750_DETECTED = luxMeter.begin();
+  if(BH1750_DETECTED) {
+    mb.enqueueMessage("BH1750 Test begin", "INFO");
+  } else {
+    mb.enqueueMessage("BH1750 not found or damage", "ERROR");
+  }
 }
 
 void setupMqSensor(){
   if(MQ_DATA_DELETE){
-    deleteFileData(MQ_DATA_FILE);
+    mb.deleteFileData(MQ_DATA_FILE);
   }
   float calcR0 = 0;
   //Set math model to calculate the PPM concentration and the value of constants
@@ -230,28 +260,28 @@ void setupMqSensor(){
   MQ135.setRL(2); //If the RL value is different from 10K, assign new RL value
 
   JsonDocument json;
-  json = loadData(MQ_DATA_FILE);
+  json = mb.loadData(MQ_DATA_FILE);
   
   if (!json["ERROR"]){
   //if (json.containsKey("R0_VALUE")){
     calcR0 = json["R0_VALUE"];
-    enqueueMessage("MQ load config calibration R0 = " + String(calcR0), "INFO");
+    mb.enqueueMessage("MQ load config calibration R0 = " + String(calcR0), "INFO");
   } else {
     calcR0 = mqSensorCalibration();
-    enqueueMessage("MQ sensor calibration using R0 = " + String(calcR0), "INFO");
+    mb.enqueueMessage("MQ sensor calibration using R0 = " + String(calcR0), "INFO");
   }
 
   if(isinf(calcR0)) {
-    enqueueMessage("R0 is infinite (Open circuit detected)", "ERROR");
+    mb.enqueueMessage("R0 is infinite (Open circuit detected)", "ERROR");
     MQ_DETECTED = false;
     while(1);
   } else if(calcR0 == 0){
-    enqueueMessage("R0 is zero (Analog pin shorts to ground)", "ERROR");
+    mb.enqueueMessage("R0 is zero (Analog pin shorts to ground)", "ERROR");
     MQ_DETECTED = false;
     while(1);
   } else {
-    MQ135.setR0(calcR0); // Se evita calibrar por valores muy distintos entre incubadoras
-    enqueueMessage("MQ135 sensor started", "INFO");
+    MQ135.setR0(calcR0);
+    mb.enqueueMessage("MQ135 sensor started", "INFO");
     MQ_DETECTED = true;
   }
 }
@@ -264,7 +294,7 @@ float mqSensorCalibration(){
   // We recomend executing this routine only on setup in laboratory conditions.
   // This routine does not need to be executed on each restart, you can load your R0 value from eeprom.
   // Acknowledgements: https://jayconsystems.com/blog/understanding-a-gas-sensor
-  enqueueMessage("MQ135 sensor is being Calibrating, please wait", "INFO");
+  mb.enqueueMessage("MQ135 sensor is being Calibrating, please wait", "INFO");
   float calcR0 = 0;
   for(int i = 1; i<=10; i ++)
   {
@@ -275,21 +305,37 @@ float mqSensorCalibration(){
   
   JsonDocument json;
   json["R0_VALUE"] = calcR0;
-  saveData(json, MQ_DATA_FILE);
+  mb.saveData(json, MQ_DATA_FILE);
   /*****************************  MQ CAlibration ********************************************/ 
   return calcR0;
 }
 
 void setupBme280Sensor(){
-  BME280_DETECTED = bme.begin(0x76);  
+  BME280_DETECTED = bme.begin(0x76);
   if (!BME280_DETECTED) {
-    enqueueMessage("Could not find a valid BME280 sensor!", "ERROR");
+    mb.enqueueMessage("Could not find a valid BME280 sensor!", "ERROR");
   } else {
-    enqueueMessage("BME280 sensor started", "INFO");
+    mb.enqueueMessage("BME280 sensor started", "INFO");
   }
+
 }
 
-void sendTelemetryJson(const JsonVariantConst &data){
+void  setupRelay() {
+  /************* Relay control *************/
+  //  pinMode(Relay1, OUTPUT);
+  //  pinMode(Relay2, OUTPUT);
+  pinMode(Relay3, OUTPUT);
+  pinMode(Relay4, OUTPUT);
+  
+  //During Start all Relays should TURN OFF
+  //  digitalWrite(Relay1, HIGH);
+  //  digitalWrite(Relay2, HIGH);
+  digitalWrite(Relay3, HIGH);
+  digitalWrite(Relay4, HIGH);
+  /************* End Relay control *************/
+}
+
+void sendTelemetryJson(const JsonDocument &data){
   tb.sendTelemetryJson(data, Helper::Measure_Json(data));
   serializeJsonPretty(data, Serial);
   Serial.println();
@@ -353,7 +399,7 @@ JsonDocument getBme280DataJson(){
 
 /************* RPC callbacks *************/
 void rpcSubscribe(){
- enqueueMessage("Subscribing for RPC", "INFO");
+ mb.enqueueMessage("Subscribing for RPC", "INFO");
 
   const std::array<RPC_Callback, 2U> callbacks = {
     RPC_Callback{ RPC_SET_HOURS_OF_LIGHT,                   processSetTimeAlarms},
@@ -363,11 +409,11 @@ void rpcSubscribe(){
   // Perform a subscription. All consequent data processing will happen in
   // processTemperatureChange() and processSwitchChange() functions,
   // as denoted by callbacks array.
-  if (!tb.RPC_Subscribe(callbacks.cbegin(), callbacks.cend())) {
-    enqueueMessage("Failed to subscribe for RPC", "ERROR");
+  if (!rpc.RPC_Subscribe(callbacks.cbegin(), callbacks.cend())) {
+    mb.enqueueMessage("Failed to subscribe for RPC", "ERROR");
     return;
   }
-  enqueueMessage("Subscribe done", "INFO");
+  mb.enqueueMessage("Subscribe done", "INFO");
   subscribed = true;
 }
 
@@ -376,8 +422,8 @@ void rpcSubscribe(){
 /// See https://arduinojson.org/v5/api/jsonvariant/subscript/ for more details
 /// @param data Data containing the rpc data that was called and its current value
 /// @return Response that should be sent to the cloud. Useful for getMethods
-RPC_Response processSetTimeAlarms(const RPC_Data &data) {
-  enqueueMessage("Received RPC call SetTimeAlarms", "RCP");
+void processSetTimeAlarms(const JsonVariantConst &data, JsonDocument &response) {
+  mb.enqueueMessage("Received RPC call SetTimeAlarms", "RCP");
 
   // Process data
   //Lights on time
@@ -394,7 +440,7 @@ RPC_Response processSetTimeAlarms(const RPC_Data &data) {
 
   setTimeAlarms(lOnHour, lOnMin, lOnSec, lOffHour, lOffMin, lOffSec);
 
-  return RPC_Response(RPC_RESPONSE_KEY, 42);
+  response.set(42);
 }
 
 /// @brief Processes function for RPC call "SetTimeAlarms"
@@ -402,21 +448,27 @@ RPC_Response processSetTimeAlarms(const RPC_Data &data) {
 /// See https://arduinojson.org/v5/api/jsonvariant/subscript/ for more details
 /// @param data Data containing the rpc data that was called and its current value
 /// @return Response that should be sent to the cloud. Useful for getMethods
-RPC_Response processTimeToSendTelemetry(const RPC_Data &data) {
-  enqueueMessage("Received timeToSendTelemetry method", "RCP");
-
-  // Process data
-  //Lights on time
+void processTimeToSendTelemetry(const JsonVariantConst &data, JsonDocument &response) {
+  mb.enqueueMessage("Received timeToSendTelemetry method", "RCP");
   TIME_TO_SEND_TELEMETRY = data["TIME_TO_SEND_TELEMETRY"];
-  
-  enqueueMessage("Send telemetry every " + String(TIME_TO_SEND_TELEMETRY) + " seconds", "RCP");
-  return RPC_Response(RPC_RESPONSE_KEY, 42);
+
+  JsonDocument json;
+  json = mb.loadData(WM_DATA_FILE);
+
+  if (!json["ERROR"]){
+    json["TIME_TO_SEND_TELEMETRY"] = TIME_TO_SEND_TELEMETRY;
+  }
+
+  mb.saveData(json, WM_DATA_FILE);
+
+  mb.enqueueMessage("Send telemetry every " + String(TIME_TO_SEND_TELEMETRY) + " seconds", "RCP");
+  response.set(42);
 }
 
 /// @brief Processes function for RPC response of "getCurrentTime".
 /// If no response is set the callback is called with {"error": "timeout"}, after a few seconds
 /// @param data Data containing the rpc response that was sent by the cloud
-void processTime(const JsonVariantConst &data) {
+void processTime(JsonDocument const & data) {
   time_t time = data["time"];
   // Time Alarms
   setTime(time);
@@ -425,6 +477,38 @@ void processTime(const JsonVariantConst &data) {
 }
 
 /************* End RPC callbacks *************/
+
+/************* OTA callbacks *************/
+/// @brief Update starting callback method that will be called as soon as the shared attribute firmware keys have been received and processed
+/// and the moment before we subscribe the necessary topics for the OTA firmware update.
+/// Is meant to give a moment were any additional processes or communication with the cloud can be stopped to ensure the update process runs as smooth as possible.
+/// To ensure that calling the ThingsBoardSized::Cleanup_Subscriptions() method can be used which stops any receiving of data over MQTT besides the one for the OTA firmware update,
+/// if this method is used ensure to call all subscribe methods again so they can be resubscribed, in the method passed to the finished_callback if the update failed and we do not restart the device
+void update_starting_callback() {
+  // Nothing to do
+}
+
+/// @brief End callback method that will be called as soon as the OTA firmware update, either finished successfully or failed.
+/// Is meant to allow to either restart the device if the udpate was successfull or to restart any stopped services before the update started in the subscribed update_starting_callback
+/// @param success Either true (update successful) or false (update failed)
+void finished_callback(const bool & success) {
+  if (success) {
+    Serial.println("Done, Reboot now");
+    ESP.restart();
+    return;
+  }
+  Serial.println("Downloading firmware failed");
+}
+
+/// @brief Progress callback method that will be called every time our current progress of downloading the complete firmware data changed,
+/// meaning it will be called if the amount of already downloaded chunks increased.
+/// Is meant to allow to display a progress bar or print the current progress of the update into the console with the currently already downloaded amount of chunks and the total amount of chunks
+/// @param current Already received and processs amount of chunks
+/// @param total Total amount of chunks we need to receive and process until the update has completed
+void progress_callback(const size_t & current, const size_t & total) {
+  Serial.printf("Progress %.2f%%\n", static_cast<float>(current * 100U) / total);
+}
+/************* End OTA callbacks *************/
 
 /************* Wifi Manager *************/
 void setupWifiManager(bool DRD_DETECTED){
@@ -439,19 +523,20 @@ void setupWifiManager(bool DRD_DETECTED){
 
   //reset settings - for testing
   if (RESET_SETTINGS){
-    deleteFileData(WM_DATA_FILE);
+    mb.deleteFileData(WM_DATA_FILE);
     wm.resetSettings();
     wm.erase();
   }
 
   JsonDocument json;
-  json = loadData(WM_DATA_FILE);
+  json = mb.loadData(WM_DATA_FILE);
   
   if (!json["ERROR"]){
     strcpy(THINGSBOARD_SERVER, json["THINGSBOARD_SERVER"]);
     //strcpy(THINGSBOARD_PORT, json["THINGSBOARD_PORT"]);
     strcpy(TOKEN, json["TOKEN"]);
     STAND_ALONE = json["STAND_ALONE"];
+    TIME_TO_SEND_TELEMETRY = json["TIME_TO_SEND_TELEMETRY"];
   }
 
   WiFiManagerParameter custom_server("server", "MaterBox server", THINGSBOARD_SERVER, 40);
@@ -503,16 +588,16 @@ void setupWifiManager(bool DRD_DETECTED){
   if(DRD_DETECTED || TEST_CP){
     Alarm.delay(1000);
     if(!wm.startConfigPortal("MaterBox IoT", "123456789")){
-      enqueueMessage("Failed to connect and hit timeout", "INFO");
+      mb.enqueueMessage("Failed to connect and hit timeout", "INFO");
     } else {
-      enqueueMessage("Wifi connected :)", "INFO");
+      mb.enqueueMessage("Wifi connected :)", "INFO");
       wifiInfo();
     }
   } else {
     if(!wm.autoConnect("MaterBox IoT", "123456789")){
-      enqueueMessage("Failed to connect and hit timeout", "INFO");
+      mb.enqueueMessage("Failed to connect and hit timeout", "INFO");
     } else {
-      enqueueMessage("Wifi connected :)", "INFO");
+      mb.enqueueMessage("Wifi connected :)", "INFO");
       wifiInfo();
     }
   }
@@ -528,21 +613,22 @@ void setupWifiManager(bool DRD_DETECTED){
     //json["mqtt_port"] = mqtt_port;
     json["TOKEN"] = TOKEN;
     json["STAND_ALONE"] = STAND_ALONE;
-    saveData(json, WM_DATA_FILE);
+    json["TIME_TO_SEND_TELEMETRY"] = TIME_TO_SEND_TELEMETRY;
+    mb.saveData(json, WM_DATA_FILE);
   }
 }
 
 void saveWifiCallback(){
-  enqueueMessage("wm save settings Callback fired ", "INFO");
+  mb.enqueueMessage("wm save settings Callback fired ", "INFO");
 }
 
 //gets called when WiFiManager enters configuration mode
 void configModeCallback (WiFiManager *myWiFiManager) {
-  enqueueMessage("wm config Mode Callback fired", "INFO");
+  mb.enqueueMessage("wm config Mode Callback fired", "INFO");
 }
 
 void saveParamCallback(){
-  enqueueMessage("wm save Parameters Callback fired", "INFO");
+  mb.enqueueMessage("wm save Parameters Callback fired", "INFO");
   SAVE_PARAMS = true;
 }
 
@@ -553,12 +639,12 @@ void bindServerCallback(){
 
 void handleRoute(){
   wm.server->send(200, "text/plain", "hello from user code");
-  enqueueMessage("wm handle route", "INFO");
+  mb.enqueueMessage("wm handle route", "INFO");
 }
 
 void wifiInfo(){
   // can contain gargbage on esp32 if wifi is not ready yet
-  enqueueMessage("Wifi debug data", "INFO");
+  mb.enqueueMessage("Wifi debug data", "INFO");
 
   JsonDocument json;
   json["SAVED"] = (String)(wm.getWiFiIsSaved() ? "YES" : "NO");
@@ -567,85 +653,9 @@ void wifiInfo(){
   json["Hostname"] = (String)WiFi.getHostname();
   
   // WiFi.printDiag(Serial);
-  enqueueMessageJson(json, "INFO", true);
+  mb.enqueueMessageJson(json, "INFO", true);
 }
 /************* End Wifi Manager *************/
-// Save data to eeprom in the specific file
-void saveData(JsonDocument json, String fileName) {
-      enqueueMessage("Saving data", "INFO");
-      File dataFile = LittleFS.open("/" + fileName, "w");
-      if (!dataFile) {
-        enqueueMessage("failed to open " + fileName + " for writing", "ERROR");
-      } else {
-        serializeJson(json, dataFile);
-      }
-      dataFile.close();
-}
-
-JsonDocument loadData(String fileName) {
-  enqueueMessage("Mounting " + fileName, "INFO");
-  JsonDocument json;
-  //https://www.hackster.io/Neutrino-1/littlefs-read-write-delete-using-esp8266-and-arduino-ide-867180
-  //read file from FileSistem
-  if(!LittleFS.begin()){
-    enqueueMessage("Mounting file", "ERROR");
-    Alarm.delay(1000);
-    json["ERROR"] = true;
-  } else {
-    enqueueMessage("Mounted file system", "INFO");
-    if (LittleFS.exists("/" + fileName)) {
-      //file exists, reading and loading
-      enqueueMessage("reading " + fileName, "INFO");
-      File dataFile = LittleFS.open("/" + fileName, "r");
-      if (dataFile) {
-        enqueueMessage("Opened " + fileName, "INFO");
-        size_t size = dataFile.size();
-        
-        // Allocate a buffer to store contents of the file.
-        std::unique_ptr<char[]> buf(new char[size]);
-        dataFile.readBytes(buf.get(), size);
-        auto deserializeError = deserializeJson(json, buf.get());
-        dataFile.close();
-
-        if (!deserializeError) {
-          enqueueMessage("Data loaded", "INFO");
-          json["ERROR"] = false;
-        } else {
-          enqueueMessage("failed to load " + fileName, "ERROR");
-          json["ERROR"] = true;
-        }
-      }
-    } else {
-      json["ERROR"] = true;
-    }
-  }
-  return json;
-}
-
-void enqueueMessage(String message, String Type){
-  Serial.print("[");
-  Serial.print(Type);
-  Serial.print("] ");
-  Serial.println(message);
-}
-
-void enqueueMessageJson(JsonDocument json, String Type, bool Pretty){
-  Serial.print("[");
-  Serial.print(Type);
-  Serial.print("] ");
-  if(Pretty){
-    serializeJsonPretty(json, Serial);
-  } else {
-    serializeJson(json, Serial);
-  }
-  
-  Serial.println();
-}
-
-void deleteFileData(String fileName){
-   //Remove the file
-   LittleFS.remove("/" + fileName);
-}
 
 void getDeviceId(byte macAddressArray[], unsigned int len, char buffer[]){
     for (unsigned int i = 0; i < len; i++){
@@ -658,19 +668,26 @@ void getDeviceId(byte macAddressArray[], unsigned int len, char buffer[]){
 }
 
 void setLocalTime(){
-  enqueueMessage("Request time from server", "RPC");
-  const RPC_Request_Callback callback(RPC_REQUEST_GET_CURRENT_TIME, &processTime);
+  mb.enqueueMessage("Request time from server", "RPC");
+  
+  RPC_Request_Callback callback(RPC_REQUEST_GET_CURRENT_TIME, &processTime, nullptr, REQUEST_TIMEOUT_MICROSECONDS, &requestTimedOut);
+
   // Perform a request of the given RPC method. Optional responses are handled in processTime
-  if (!tb.RPC_Request(callback)) {
-    enqueueMessage("Failed to request for RPC", "ERROR");
+  if (!rpc_request.RPC_Request(callback)) {
+    mb.enqueueMessage("Failed to request for RPC", "ERROR");
   } else {
-    enqueueMessage("Request done", "INFO");
+    mb.enqueueMessage("Request done", "INFO");
     SET_TIME = false;
   }
 }
 
+/// @brief Attribute request did not receive a response in the expected amount of microseconds 
+void requestTimedOut() {
+  Serial.printf("RPC request timed out did not receive a response in (%llu) microseconds. Ensure client is connected to the MQTT broker and that the RPC method actually exist on the device Rule chain\n", REQUEST_TIMEOUT_MICROSECONDS);
+}
+
 void printActualTime(){
-  enqueueMessage("Time: " + String(hour()) + ":" + String(minute()) + ":" + String(second()), "INFO");
+  mb.enqueueMessage("Time: " + String(hour()) + ":" + String(minute()) + ":" + String(second()), "INFO");
 }
 
 void setTimeAlarms(int lOnHour, int lOnMin, int lOnSec, int lOffHour, int lOffMin, int lOffSec){
@@ -678,10 +695,9 @@ void setTimeAlarms(int lOnHour, int lOnMin, int lOnSec, int lOffHour, int lOffMi
     Alarm.free(ALARM_ID_ON);
     Alarm.free(ALARM_ID_OFF);
   }
-  bool SAVE_DATA =  false;
   JsonDocument json;
   if (lOnHour == 30){
-    json = loadData(LIGHTS_CONTROL_DATA_FILE);
+    json = mb.loadData(LIGHTS_CONTROL_DATA_FILE);
     if (!json["ERROR"]){
       //Lights on time
       lOnHour = json["lOnHour"];
@@ -692,7 +708,7 @@ void setTimeAlarms(int lOnHour, int lOnMin, int lOnSec, int lOffHour, int lOffMi
       lOffHour= json["lOffHour"];
       lOffMin = json["lOffMin"];
       lOffSec = json["lOffSec"];
-      enqueueMessage("Setting alarms from lights control data file", "INFO");
+      mb.enqueueMessage("Setting alarms from lights control data file", "INFO");
     } else {
       //Lights on time
       lOnHour = 6;
@@ -703,10 +719,10 @@ void setTimeAlarms(int lOnHour, int lOnMin, int lOnSec, int lOffHour, int lOffMi
       lOffHour= 14;
       lOffMin = 0;
       lOffSec = 0;
-      enqueueMessage("Setting alarms from default values", "INFO");
+      mb.enqueueMessage("Setting alarms from default values", "INFO");
     }
   } else {
-      enqueueMessage("Setting alarms from RPC call", "INFO");
+      mb.enqueueMessage("Setting alarms from RPC call", "INFO");
       //Lights on time
       json["lOnHour"] = lOnHour;
       json["lOnMin"] = lOnMin;
@@ -716,38 +732,38 @@ void setTimeAlarms(int lOnHour, int lOnMin, int lOnSec, int lOffHour, int lOffMi
       json["lOffHour"] = lOffHour;
       json["lOffMin"] = lOffMin;
       json["lOffSec"] = lOffSec;
-      enqueueMessage("Saving alarms info to ligths control data file", "INFO");
-      saveData(json, LIGHTS_CONTROL_DATA_FILE);
+      mb.enqueueMessage("Saving alarms info to ligths control data file", "INFO");
+      mb.saveData(json, LIGHTS_CONTROL_DATA_FILE);
   }
   ALARM_ID_ON = Alarm.alarmRepeat(lOnHour, lOnMin, lOnSec, turnLightsOn);
-  enqueueMessage("Encender: " + String(lOnHour) + ":" + String(lOnMin) + ":" + String(lOnSec), "INFO");
+  mb.enqueueMessage("Encender: " + String(lOnHour) + ":" + String(lOnMin) + ":" + String(lOnSec), "INFO");
 
   ALARM_ID_OFF = Alarm.alarmRepeat(lOffHour, lOffMin, lOffSec, turnLightsOff);
-  enqueueMessage("Apagar: " + String(lOffHour) + ":" + String(lOffMin) + ":" + String(lOffSec), "INFO");
+  mb.enqueueMessage("Apagar: " + String(lOffHour) + ":" + String(lOffMin) + ":" + String(lOffSec), "INFO");
 
 //  Alarm.timerRepeat(15, Repeats);           // timer for every 15 seconds
   if(ALARM_ID_ON == 255 || ALARM_ID_OFF == 255){
-    enqueueMessage("Alarms not set. Try again", "WARN");
+    mb.enqueueMessage("Alarms not set. Try again", "WARN");
     Alarm.free(ALARM_ID_ON);
     Alarm.free(ALARM_ID_OFF);
     ALARMS_ARE_SET = false;
     SET_ALARMS = true;
   } else {
-    enqueueMessage("Alarm ON set. Id: " + String(ALARM_ID_ON), "INFO");
-    enqueueMessage("Alarm OFF set. Id: " + String(ALARM_ID_OFF), "INFO");
+    mb.enqueueMessage("Alarm ON set. Id: " + String(ALARM_ID_ON), "INFO");
+    mb.enqueueMessage("Alarm OFF set. Id: " + String(ALARM_ID_OFF), "INFO");
     ALARMS_ARE_SET = true;
     SET_ALARMS = false;
   }
 }
 
 void turnLightsOn(){
-  enqueueMessage("Triggered turn lights on alarm", "INFO");
+  mb.enqueueMessage("Triggered turn lights on alarm", "INFO");
   digitalWrite(Relay3, LOW);
   //tb.sendTelemetryData("lights", 1);
 }
 
 void turnLightsOff(){
-  enqueueMessage("Triggered turn lights off alarm", "INFO");
+  mb.enqueueMessage("Triggered turn lights off alarm", "INFO");
   digitalWrite(Relay3, HIGH);
   //tb.sendTelemetryData("lights", 0);
 }
