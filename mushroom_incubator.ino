@@ -9,7 +9,7 @@
 /************* Define default values *************/
 constexpr uint32_t SERIAL_DEBUG_BAUD = 115200U;
 constexpr char CURRENT_FIRMWARE_TITLE[] = "MB-MushroomIncubator";
-constexpr char CURRENT_FIRMWARE_VERSION[] = "0.1.0";
+constexpr char CURRENT_FIRMWARE_VERSION[] = "0.1.1";
 const char* deviceName            = "MB-Mushroom-Incubator";
 unsigned long mtime               = 0;
 int TIME_TO_SEND_TELEMETRY  = 30; //every x seconds to send tellemetry
@@ -35,6 +35,7 @@ DoubleResetDetector* drd;
 //#define THINGSBOARD_ENABLE_PSRAM 0
 
 #include <Arduino_MQTT_Client.h>
+#include <Arduino_ESP8266_Updater.h>
 #include <OTA_Firmware_Update.h>
 #include <Server_Side_RPC.h>
 #include <Client_Side_RPC.h>
@@ -88,6 +89,11 @@ const std::array<IAPI_Implementation*, 3U> apis = {
 
 // Initialize ThingsBoard instance with the maximum needed buffer size
 ThingsBoard tb(mqttClient, MAX_MESSAGE_RECEIVE_SIZE, MAX_MESSAGE_SEND_SIZE, Default_Max_Stack_Size, apis);
+
+// Initalize the Updater client instance used to flash binary to flash memory
+Arduino_ESP8266_Updater updater;
+// Statuses for updating
+
 /************* End Thingsboard *************/
 
 /************* Wifi Manager *************/
@@ -402,8 +408,8 @@ void rpcSubscribe(){
  mb.enqueueMessage("Subscribing for RPC", "INFO");
 
   const std::array<RPC_Callback, 2U> callbacks = {
-    RPC_Callback{ RPC_SET_HOURS_OF_LIGHT,                   processSetTimeAlarms},
-    RPC_Callback{ RPC_TIME_TO_SEND_TELEMETRY,               processTimeToSendTelemetry}
+    RPC_Callback{ RPC_SET_HOURS_OF_LIGHT,     processSetTimeAlarms},
+    RPC_Callback{ RPC_TIME_TO_SEND_TELEMETRY, processTimeToSendTelemetry}
   };
 
   // Perform a subscription. All consequent data processing will happen in
@@ -414,6 +420,15 @@ void rpcSubscribe(){
     return;
   }
   mb.enqueueMessage("Subscribe done", "INFO");
+  
+  mb.enqueueMessage("OTA Firwmare Update Subscription...", "INFO");
+  const OTA_Update_Callback callback(CURRENT_FIRMWARE_TITLE, CURRENT_FIRMWARE_VERSION, &updater, &finished_callback, &progress_callback, &update_starting_callback, FIRMWARE_FAILURE_RETRIES, FIRMWARE_PACKET_SIZE);
+  // See https://thingsboard.io/docs/user-guide/ota-updates/
+  // to understand how to create a new OTA pacakge and assign it to a device so it can download it.
+  // Sending the request again after a successfull update will automatically send the UPDATED firmware state,
+  // because the assigned firmware title and version on the cloud and the firmware version and title we booted into are the same.
+  updateRequestSent = ota.Subscribe_Firmware_Update(callback);
+
   subscribed = true;
 }
 
@@ -478,7 +493,7 @@ void processTime(JsonDocument const & data) {
 
 /************* End RPC callbacks *************/
 
-/************* OTA callbacks *************/
+/************* OTA *************/
 /// @brief Update starting callback method that will be called as soon as the shared attribute firmware keys have been received and processed
 /// and the moment before we subscribe the necessary topics for the OTA firmware update.
 /// Is meant to give a moment were any additional processes or communication with the cloud can be stopped to ensure the update process runs as smooth as possible.
@@ -495,9 +510,12 @@ void finished_callback(const bool & success) {
   if (success) {
     Serial.println("Done, Reboot now");
     ESP.restart();
+    mb.enqueueMessage("Downloading firmware success", "OTA");
+
     return;
   }
-  Serial.println("Downloading firmware failed");
+  mb.enqueueMessage("Downloading firmware failed", "OTA");
+  Serial.println();
 }
 
 /// @brief Progress callback method that will be called every time our current progress of downloading the complete firmware data changed,
@@ -508,7 +526,8 @@ void finished_callback(const bool & success) {
 void progress_callback(const size_t & current, const size_t & total) {
   Serial.printf("Progress %.2f%%\n", static_cast<float>(current * 100U) / total);
 }
-/************* End OTA callbacks *************/
+
+/************* End OTA *************/
 
 /************* Wifi Manager *************/
 void setupWifiManager(bool DRD_DETECTED){
@@ -553,7 +572,7 @@ void setupWifiManager(bool DRD_DETECTED){
   
   // add all your parameters here
   wm.addParameter(&custom_server);
-//  wm.addParameter(&custom_mqtt_port);
+  //  wm.addParameter(&custom_mqtt_port);
   wm.addParameter(&custom_api_token);
   wm.addParameter(&device_type);
   wm.addParameter(&device_id);
