@@ -154,6 +154,17 @@ Adafruit_BME280 bme; // I2C
 bool BME280_DETECTED = false;
 /************* End Sensor BME280 *************/
 
+/************* Sensor DHT11 *************/
+#include "DHT.h"
+
+// DHT
+#define DHT_PIN_1 13 //D7
+#define DHTTYPE DHT11
+
+// Initialize DHT sensor.
+DHT dht(DHT_PIN_1, DHTTYPE);
+/************* End Sensor SCT013 *************/
+
 /************* Sensor MQ-series *************/
 String MQ_DATA_FILE = "mqdata.txt";
 bool MQ_DETECTED = false;
@@ -197,6 +208,7 @@ void setup() {
 
   setupBh1750Sensor();
   setupBme280Sensor();
+  setupDhtSensor();
   setupMqSensor();
   setupRelay();
 
@@ -229,6 +241,7 @@ void loop() {
         }
         if (BME280_DETECTED){
           sendTelemetryJson(getBme280DataJson());
+          sendTelemetryJson(getDhtDataJson());
         }
         if (MQ_DETECTED){
           sendTelemetryJson(getMqDataJson());
@@ -323,7 +336,10 @@ void setupBme280Sensor(){
   } else {
     mb.enqueueMessage("BME280 sensor started", "INFO");
   }
+}
 
+void setupDhtSensor(){
+  dht.begin();
 }
 
 void  setupRelay() {
@@ -399,6 +415,25 @@ JsonDocument getBme280DataJson(){
   json["temperature"] = temperature / 10; //Dividing to get means
   json["humidity"] = humidity / 10; //Dividing to get means
   json["pressure"] = pressure / 10; //Dividing to get means
+  
+  return json;
+}
+
+JsonDocument getDhtDataJson(){
+  JsonDocument json;
+
+  // Reading temperature or humidity takes about 250 milliseconds!
+  float humidity2 = dht.readHumidity();
+  // Read temperature as Celsius (the default)
+  float temperature2 = dht.readTemperature();
+
+  // Check if any reads failed and exit early (to try again).
+  if (isnan(humidity2) || isnan(temperature2)) {
+    Serial.println("Failed to read from DHT sensor!");
+  } else {
+    json["temperature2"] = temperature2;
+    json["humidity2"] = humidity2;
+  }
   
   return json;
 }
