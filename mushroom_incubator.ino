@@ -58,6 +58,7 @@ bool subscribed = false;
 constexpr char RPC_REQUEST_GET_CURRENT_TIME[] = "getCurrentTime";
 constexpr const char RPC_SET_HOURS_OF_LIGHT[] = "setHoursOfLight";
 constexpr const char RPC_TIME_TO_SEND_TELEMETRY[] = "timeToSendTelemetry";
+constexpr const char RPC_SET_RELAY[] = "setRelay";
 constexpr uint8_t MAX_RPC_SUBSCRIPTIONS = 3U;
 constexpr uint8_t MAX_RPC_RESPONSE = 5U;
 constexpr uint8_t MAX_RPC_REQUEST = 5U;
@@ -129,8 +130,8 @@ int ALARM_ID_OFF;
 /************* Relay control *************/
 bool state = false;
 //using namespace ace_button;
-#define Relay1 5   // GPIO5-D1   morado
-#define Relay2 4   // GPIO4-D2   naranja
+//#define Relay1 5   // GPIO5-D1   morado
+//#define Relay2 4   // GPIO4-D2   naranja
 #define Relay3 14  // GPIO14-D5   amarillo
 #define Relay4 12  // GPIO12-D6    azul
 
@@ -187,6 +188,11 @@ MQUnifiedsensor MQ135(BOARD, VOLTAGE_RESOLUTION, ADC_BIT_RESOLUTION, MQ_ANALOG_P
 MATERBOX mb;
 /************* Prototype functions *************/
 void setTimeAlarms(int lOnHour=30, int lOnMin=0, int lOnSec=0, int lOffHour=0, int lOffMin=0, int lOffSec=0);
+void processSetTimeAlarms(const JsonVariantConst &data, JsonDocument &response);
+void processTimeToSendTelemetry(const JsonVariantConst &data, JsonDocument &response);
+void processSetRelay(const JsonVariantConst &data, JsonDocument &response);
+void fanOn();
+void fanOff();
 /************* End Prototype functions *************/
 
 void setup() {
@@ -472,9 +478,10 @@ JsonDocument getDs18b20DataJson(){
 void rpcSubscribe(){
  mb.enqueueMessage("Subscribing for RPC", "INFO");
 
-  const std::array<RPC_Callback, 2U> callbacks = {
+  const std::array<RPC_Callback, 3U> callbacks = {
     RPC_Callback{ RPC_SET_HOURS_OF_LIGHT,     processSetTimeAlarms},
     RPC_Callback{ RPC_TIME_TO_SEND_TELEMETRY, processTimeToSendTelemetry},
+    RPC_Callback{ RPC_SET_RELAY,              processSetRelay}
   };
 
   // Perform a subscription. All consequent data processing will happen in
@@ -538,6 +545,35 @@ void processTimeToSendTelemetry(const JsonVariantConst &data, JsonDocument &resp
 
   mb.enqueueMessage("Send telemetry every " + String(TIME_TO_SEND_TELEMETRY) + " seconds", "RCP");
   response.set(42);
+}
+
+/// @brief Callback para atender la llamada RPC "setRelay" enviada desde ThingsBoard Rule Engine al cambiar el umbral de CO2.
+/// @param data Contiene el parámetro boolean (true/false) enviado por el servidor.
+/// @param response Respuesta enviada de vuelta al servidor ThingsBoard.
+void processSetRelay(const JsonVariantConst &data, JsonDocument &response) {
+  mb.enqueueMessage("Received RPC call setRelay", "RPC");
+
+  bool relayState = false;
+
+  // Extraer el parámetro si viene como booleano directo o dentro de un objeto JSON
+  if (data.is<bool>()) {
+    relayState = data.as<bool>();
+  } else if (data.is<JsonObjectConst>() && data.containsKey("enabled")) {
+    relayState = data["enabled"].as<bool>();
+  } else if (data.is<JsonObjectConst>() && data.containsKey("params")) {
+    relayState = data["params"].as<bool>();
+  } else {
+    relayState = data.as<bool>();
+  }
+
+  // Activar o desactivar el extractor mediante las funciones dedicadas
+  if (relayState) {
+    fanOn();
+  } else {
+    fanOff();
+  }
+
+  response.set(relayState);
 }
 
 /// @brief Processes function for RPC response of "getCurrentTime".
@@ -754,9 +790,9 @@ void setLocalTime(){
 
   // Perform a request of the given RPC method. Optional responses are handled in processTime
   if (!rpc_request.RPC_Request(callback)) {
-    mb.enqueueMessage("Failed to request for RPC", "ERROR");
+    mb.enqueueMessage("Failed to request time from server", "ERROR");
   } else {
-    mb.enqueueMessage("Request done", "INFO");
+    mb.enqueueMessage("Request done", "RPC");
     SET_TIME = false;
   }
 }
@@ -846,6 +882,18 @@ void turnLightsOff(){
   mb.enqueueMessage("Triggered turn lights off alarm", "INFO");
   digitalWrite(Relay3, HIGH);
   //tb.sendTelemetryData("lights", 0);
+}
+
+void fanOn(){
+  mb.enqueueMessage("Relay CO2 (Relay4): ENCENDIDO (ON)", "INFO");
+  digitalWrite(Relay4, LOW);  // Encender extractor de CO2 (módulo activo en LOW)
+  tb.sendAttributeData("currentState", "true"); // Notificar estado al Rule Engine
+}
+
+void fanOff(){
+  mb.enqueueMessage("Relay CO2 (Relay4): APAGADO (OFF)", "INFO");
+  digitalWrite(Relay4, HIGH); // Apagar extractor de CO2 (módulo activo en LOW)
+  tb.sendAttributeData("currentState", "false"); // Notificar estado al Rule Engine
 }
 
 struct tm getTime() {
