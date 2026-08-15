@@ -230,30 +230,42 @@ void loop() {
         tb.sendAttributeData("TimeToSendTelemetry", TIME_TO_SEND_TELEMETRY);
         mb.enqueueMessage("Send telemetry every " + String(TIME_TO_SEND_TELEMETRY) + " seconds", "INFO");
       } else {
-        if (!subscribed) {
-            rpcSubscribe();
-        }
-        if (SET_TIME){ //Get current time if not set
-          setLocalTime();
-        }
-        if(SET_ALARMS){ //Set hours of light
-          setTimeAlarms();
-        }
-        if (BH1750_DETECTED){
-          sendTelemetryJson(getBh1750DataJson());
-        }
-        if (BME280_DETECTED){
-          sendTelemetryJson(getBme280DataJson());
-          sendTelemetryJson(getDhtDataJson());
-        }
-        if (MQ_DETECTED){
-          sendTelemetryJson(getMqDataJson());
-        }
+        mb.enqueueMessage("Server connected", "INFO");
+        tbconnected = true;
       }
     } else {
-      mb.enqueueMessage("WiFi.status() == WL_CONNECTED " + String(WiFi.status()), "ERROR");
+      tbconnected = true;
     }
-    mtime = millis();
+
+    if (tbconnected && !subscribed) {
+      rpcSubscribe();
+    }
+    if (SET_TIME){ //Get current time if not set
+      setLocalTime();
+    }
+    if(SET_ALARMS && TIME_SET){ //Set hours of light
+      setTimeAlarms();
+    }
+
+    if (tb.connected() && (now - mtime >= (TIME_TO_SEND_TELEMETRY * 1000))) {
+      mtime = now;
+
+      if (BH1750_DETECTED){
+      sendTelemetryJson(getBh1750DataJson());
+      }
+
+      if (BME280_DETECTED){
+        sendTelemetryJson(getBme280DataJson());
+      }
+
+      if (DS18B20_DETECTED) {
+        sendTelemetryJson(getDs18b20DataJson());
+      }
+
+      if (MQ_DETECTED){
+        sendTelemetryJson(getMqDataJson());
+      }
+    }
   }
   tb.loop();
 }
@@ -461,10 +473,6 @@ void rpcSubscribe(){
   
   mb.enqueueMessage("OTA Firwmare Update Subscription...", "INFO");
   const OTA_Update_Callback callback(CURRENT_FIRMWARE_TITLE, CURRENT_FIRMWARE_VERSION, &updater, &finished_callback, &progress_callback, &update_starting_callback, FIRMWARE_FAILURE_RETRIES, FIRMWARE_PACKET_SIZE);
-  // See https://thingsboard.io/docs/user-guide/ota-updates/
-  // to understand how to create a new OTA pacakge and assign it to a device so it can download it.
-  // Sending the request again after a successfull update will automatically send the UPDATED firmware state,
-  // because the assigned firmware title and version on the cloud and the firmware version and title we booted into are the same.
   updateRequestSent = ota.Subscribe_Firmware_Update(callback);
 
   subscribed = true;
@@ -496,9 +504,6 @@ void processSetTimeAlarms(const JsonVariantConst &data, JsonDocument &response) 
   response.set(42);
 }
 
-/// @brief Processes function for RPC call "SetTimeAlarms"
-/// RPC_Data is a JSON variant, that can be queried using operator[]
-/// See https://arduinojson.org/v5/api/jsonvariant/subscript/ for more details
 /// @brief Processes function for RPC call "timeToSendTelemetry"
 /// @param data Data containing the rpc data that was called and its current value
 /// @return Response that should be sent to the cloud. Useful for getMethods
@@ -529,6 +534,7 @@ void processTime(JsonDocument const & data) {
   setTime(time);
   SET_TIME = false;
   printActualTime();
+  TIME_SET = true;
 }
 
 /************* End RPC callbacks *************/
