@@ -120,6 +120,7 @@ String LIGHTS_CONTROL_DATA_FILE = "lights.txt";
 
 //Time Alarms
 bool SET_TIME     = true;
+bool TIME_SET     = false;
 bool SET_ALARMS   = true;
 bool ALARMS_ARE_SET = false;
 int ALARM_ID_ON;
@@ -155,16 +156,17 @@ Adafruit_BME280 bme; // I2C
 bool BME280_DETECTED = false;
 /************* End Sensor BME280 *************/
 
-/************* Sensor DHT11 *************/
-#include "DHT.h"
+/************* Sensor DS18B20 *************/
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#define ONE_WIRE_BUS 13 // GPIO13 = D7
 
-// DHT
-#define DHT_PIN_1 13 //D7
-#define DHTTYPE DHT11
-
-// Initialize DHT sensor.
-DHT dht(DHT_PIN_1, DHTTYPE);
-/************* End Sensor SCT013 *************/
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+int numberOfDevices; 
+DeviceAddress tempDeviceAddress; 
+bool DS18B20_DETECTED = false;
+/************* End Sensor DS18B20 *************/
 
 /************* Sensor MQ-series *************/
 String MQ_DATA_FILE = "mqdata.txt";
@@ -209,7 +211,7 @@ void setup() {
 
   setupBh1750Sensor();
   setupBme280Sensor();
-  setupDhtSensor();
+  setupDs18b20Sensor();
   setupMqSensor();
   setupRelay();
 
@@ -353,8 +355,23 @@ void setupBme280Sensor(){
   }
 }
 
-void setupDhtSensor(){
-  dht.begin();
+void setupDs18b20Sensor() {
+  sensors.begin();
+  numberOfDevices = sensors.getDeviceCount();
+  DS18B20_DETECTED = (numberOfDevices > 0);
+
+  if (DS18B20_DETECTED) {
+    mb.enqueueMessage("DS18B20: " + String(numberOfDevices) + " dispositivo(s) detectado(s)", "INFO");
+    for (int i = 0; i < numberOfDevices; i++) {
+      if (sensors.getAddress(tempDeviceAddress, i)) {
+        mb.enqueueMessage("DS18B20 device " + String(i) + " OK", "INFO");
+      } else {
+        mb.enqueueMessage("DS18B20 device " + String(i) + " sin dirección. Revisar cableado.", "WARN");
+      }
+    }
+  } else {
+    mb.enqueueMessage("DS18B20 no detectado", "WARN");
+  }
 }
 
 void  setupRelay() {
@@ -434,22 +451,20 @@ JsonDocument getBme280DataJson(){
   return json;
 }
 
-JsonDocument getDhtDataJson(){
+JsonDocument getDs18b20DataJson(){
   JsonDocument json;
+  sensors.requestTemperatures(); 
 
-  // Reading temperature or humidity takes about 250 milliseconds!
-  float humidity2 = dht.readHumidity();
-  // Read temperature as Celsius (the default)
-  float temperature2 = dht.readTemperature();
-
-  // Check if any reads failed and exit early (to try again).
-  if (isnan(humidity2) || isnan(temperature2)) {
-    Serial.println("Failed to read from DHT sensor!");
-  } else {
-    json["temperature2"] = temperature2;
-    json["humidity2"] = humidity2;
+  for(int i=0; i<numberOfDevices; i++) {
+    if(sensors.getAddress(tempDeviceAddress, i)){
+      float temp = sensors.getTempC(tempDeviceAddress);
+      if (isnan(temp)) {
+        Serial.println("Failed to read from DS18B20 sensor!");
+      } else {
+        json[tempDeviceAddress] = temp;
+      }
+    }   
   }
-  
   return json;
 }
 
