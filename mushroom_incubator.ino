@@ -12,7 +12,8 @@ constexpr char CURRENT_FIRMWARE_TITLE[] = "MB-MushroomIncubator";
 constexpr char CURRENT_FIRMWARE_VERSION[] = "0.1.1";
 const char* deviceName            = "MB-Mushroom-Incubator";
 unsigned long mtime               = 0;
-int TIME_TO_SEND_TELEMETRY  = 30; //every x seconds to send tellemetry
+unsigned long TIME_TO_SEND_TELEMETRY  = 30; //every x seconds to send tellemetry
+
 /************* End Define default values *************/
 
 /************* Double Reset config *************/
@@ -212,20 +213,22 @@ void setup() {
   setupMqSensor();
   setupRelay();
 
-  mtime = TIME_TO_SEND_TELEMETRY * 1000;
+  mtime = millis();
 }
 
 void loop() {
-  if(millis()-mtime > (TIME_TO_SEND_TELEMETRY * 1000)){
-    if(WiFi.status() == WL_CONNECTED){
-      if (!tb.connected()) {
-        // Reconnect to the ThingsBoard server,
-        // if a connection was disrupted or has not yet been established
-        mb.enqueueMessage("Connecting to: " + String(THINGSBOARD_SERVER) + " with token " + String(TOKEN), "INFO");
-        if (!tb.connect(THINGSBOARD_SERVER, TOKEN, THINGSBOARD_PORT)) {
-          mb.enqueueMessage("Failed to connect", "ERROR");
-          subscribed = false;
-        }
+  unsigned long now = millis(); // Obtiene el tiempo actual
+  bool tbconnected = false;
+
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!tb.connected()) {
+      mb.enqueueMessage("Connecting to: " + String(THINGSBOARD_SERVER) + " with token " + String(TOKEN), "INFO");
+      if (!tb.connect(THINGSBOARD_SERVER, TOKEN, THINGSBOARD_PORT)) {
+        mb.enqueueMessage("Failed to connect", "ERROR");
+        tbconnected = false;
+        subscribed = false;
+        tb.sendAttributeData("TimeToSendTelemetry", TIME_TO_SEND_TELEMETRY);
+        mb.enqueueMessage("Send telemetry every " + String(TIME_TO_SEND_TELEMETRY) + " seconds", "INFO");
       } else {
         if (!subscribed) {
             rpcSubscribe();
@@ -444,7 +447,7 @@ void rpcSubscribe(){
 
   const std::array<RPC_Callback, 2U> callbacks = {
     RPC_Callback{ RPC_SET_HOURS_OF_LIGHT,     processSetTimeAlarms},
-    RPC_Callback{ RPC_TIME_TO_SEND_TELEMETRY, processTimeToSendTelemetry}
+    RPC_Callback{ RPC_TIME_TO_SEND_TELEMETRY, processTimeToSendTelemetry},
   };
 
   // Perform a subscription. All consequent data processing will happen in
@@ -496,6 +499,7 @@ void processSetTimeAlarms(const JsonVariantConst &data, JsonDocument &response) 
 /// @brief Processes function for RPC call "SetTimeAlarms"
 /// RPC_Data is a JSON variant, that can be queried using operator[]
 /// See https://arduinojson.org/v5/api/jsonvariant/subscript/ for more details
+/// @brief Processes function for RPC call "timeToSendTelemetry"
 /// @param data Data containing the rpc data that was called and its current value
 /// @return Response that should be sent to the cloud. Useful for getMethods
 void processTimeToSendTelemetry(const JsonVariantConst &data, JsonDocument &response) {
@@ -507,6 +511,7 @@ void processTimeToSendTelemetry(const JsonVariantConst &data, JsonDocument &resp
 
   if (!json["ERROR"]){
     json["TIME_TO_SEND_TELEMETRY"] = TIME_TO_SEND_TELEMETRY;
+    tb.sendAttributeData("TimeToSendTelemetry", TIME_TO_SEND_TELEMETRY);
   }
 
   mb.saveData(json, WM_DATA_FILE);
