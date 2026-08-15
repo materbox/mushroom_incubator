@@ -58,7 +58,7 @@ bool subscribed = false;
 constexpr char RPC_REQUEST_GET_CURRENT_TIME[] = "getCurrentTime";
 constexpr const char RPC_SET_HOURS_OF_LIGHT[] = "setHoursOfLight";
 constexpr const char RPC_TIME_TO_SEND_TELEMETRY[] = "timeToSendTelemetry";
-constexpr const char RPC_SET_RELAY[] = "setRelay";
+constexpr const char RPC_SET_RELAY[] = "setFanRelay";
 constexpr uint8_t MAX_RPC_SUBSCRIPTIONS = 3U;
 constexpr uint8_t MAX_RPC_RESPONSE = 5U;
 constexpr uint8_t MAX_RPC_REQUEST = 5U;
@@ -235,11 +235,12 @@ void loop() {
         mb.enqueueMessage("Failed to connect", "ERROR");
         tbconnected = false;
         subscribed = false;
-        tb.sendAttributeData("TimeToSendTelemetry", TIME_TO_SEND_TELEMETRY);
-        mb.enqueueMessage("Send telemetry every " + String(TIME_TO_SEND_TELEMETRY) + " seconds", "INFO");
       } else {
         mb.enqueueMessage("Server connected", "INFO");
         tbconnected = true;
+        tb.sendAttributeData("TimeToSendTelemetry", TIME_TO_SEND_TELEMETRY);
+        mb.enqueueMessage("Send telemetry every " + String(TIME_TO_SEND_TELEMETRY) + " seconds", "INFO");
+        fanOff(); // if new, create fanState = off attribute
       }
     } else {
       tbconnected = true;
@@ -553,27 +554,13 @@ void processTimeToSendTelemetry(const JsonVariantConst &data, JsonDocument &resp
 void processSetRelay(const JsonVariantConst &data, JsonDocument &response) {
   mb.enqueueMessage("Received RPC call setRelay", "RPC");
 
-  bool relayState = false;
-
-  // Extraer el parámetro si viene como booleano directo o dentro de un objeto JSON
-  if (data.is<bool>()) {
-    relayState = data.as<bool>();
-  } else if (data.is<JsonObjectConst>() && data.containsKey("enabled")) {
-    relayState = data["enabled"].as<bool>();
-  } else if (data.is<JsonObjectConst>() && data.containsKey("params")) {
-    relayState = data["params"].as<bool>();
-  } else {
-    relayState = data.as<bool>();
-  }
-
-  // Activar o desactivar el extractor mediante las funciones dedicadas
-  if (relayState) {
+  if (data == "on") {
     fanOn();
   } else {
     fanOff();
   }
 
-  response.set(relayState);
+  response.set(1);
 }
 
 /// @brief Processes function for RPC response of "getCurrentTime".
@@ -885,15 +872,15 @@ void turnLightsOff(){
 }
 
 void fanOn(){
-  mb.enqueueMessage("Relay CO2 (Relay4): ENCENDIDO (ON)", "INFO");
-  digitalWrite(Relay4, LOW);  // Encender extractor de CO2 (módulo activo en LOW)
-  tb.sendAttributeData("currentState", "true"); // Notificar estado al Rule Engine
+  mb.enqueueMessage("Fan (Relay4): ON", "INFO");
+  digitalWrite(Relay4, LOW);
+  tb.sendAttributeData("fanState", "on");
 }
 
 void fanOff(){
-  mb.enqueueMessage("Relay CO2 (Relay4): APAGADO (OFF)", "INFO");
-  digitalWrite(Relay4, HIGH); // Apagar extractor de CO2 (módulo activo en LOW)
-  tb.sendAttributeData("currentState", "false"); // Notificar estado al Rule Engine
+  mb.enqueueMessage("Fan (Relay4): OFF", "INFO");
+  digitalWrite(Relay4, HIGH);
+  tb.sendAttributeData("fanState", "off");
 }
 
 struct tm getTime() {
