@@ -98,12 +98,26 @@ Arduino_ESP8266_Updater updater;
 
 /************* End Thingsboard *************/
 
+/************* System Config *************/
+struct sysConfig {
+  uint32_t magic;               // Firma de integridad: 0x4D42494E ("MBIN")
+  char     server[40];          // Servidor ThingsBoard
+  char     token[40];           // Token del dispositivo
+  uint32_t timeToSendTelemetry; // Intervalo de telemetría en segundos (default 30)
+  uint8_t  lOnHour, lOnMin, lOnSec;   // Horario encendido luces (default 06:00:00)
+  uint8_t  lOffHour, lOffMin, lOffSec; // Horario apagado luces (default 18:00:00)
+  float    mqR0Value;           // Valor R0 del MQ-135 (default 0.0)
+  float    mqCleanAirRatio;     // Relación R_s/R_0 en aire limpio (default 3.6)
+};
+
+sysConfig config;
+constexpr char CONFIG_BIN_FILE[] = "config.bin";
+/************* End System Config *************/
+
 /************* Wifi Manager *************/
 const char* modes[] = { "NULL", "STA", "AP", "STA+AP" };
 
 WiFiManager wm;
-
-String WM_DATA_FILE = "config.txt";
 bool TEST_CP         = false; // always start the configportal, even if ap found
 int  TESP_CP_TIMEOUT = 180; // test cp timeout
 bool TEST_NET        = true; // do a network test after connect, (gets ntp time)
@@ -117,8 +131,6 @@ bool SAVE_PARAMS     = false;
 /************* End Wifi Manager *************/
 
 /************* Lights control *************/
-String LIGHTS_CONTROL_DATA_FILE = "lights.txt";
-
 //Time Alarms
 bool SET_TIME     = true;
 bool TIME_SET     = false;
@@ -170,7 +182,6 @@ bool DS18B20_DETECTED = false;
 /************* End Sensor DS18B20 *************/
 
 /************* Sensor MQ-series *************/
-String MQ_DATA_FILE = "mqdata.txt";
 bool MQ_DETECTED = false;
 bool MQ_DATA_DELETE  = false; // delete MQ_DATA_FILE - for testing
 #define BOARD "ESP8266"
@@ -181,18 +192,14 @@ bool MQ_DATA_DELETE  = false; // delete MQ_DATA_FILE - for testing
 #define RatioMQ135CleanAir 3.6//RS / R0 = 3.6 ppm  
 //#define calibration_button 13 //Pin to calibrate your sensor
 #include <MQUnifiedsensor.h>      //https://github.com/miguel5612/MQSensorsLib
-//Declare Sensor
 MQUnifiedsensor MQ135(BOARD, VOLTAGE_RESOLUTION, ADC_BIT_RESOLUTION, MQ_ANALOG_PIN, MQ_TYPE);
 /************* End Sensor MQ-series *************/
 
 MATERBOX mb;
 /************* Prototype functions *************/
 void setTimeAlarms(int lOnHour=30, int lOnMin=0, int lOnSec=0, int lOffHour=0, int lOffMin=0, int lOffSec=0);
-void processSetTimeAlarms(const JsonVariantConst &data, JsonDocument &response);
-void processTimeToSendTelemetry(const JsonVariantConst &data, JsonDocument &response);
-void processSetRelay(const JsonVariantConst &data, JsonDocument &response);
-void fanOn();
-void fanOff();
+JsonDocument getMqDataJson(float temperature = NAN, float humidity = NAN);
+
 /************* End Prototype functions *************/
 
 void setup() {
@@ -211,6 +218,7 @@ void setup() {
     }
 
   mb.begin();
+  initSystemConfig();
   setupWifiManager(DRD_DETECTED);
 
   setupBh1750Sensor();
@@ -225,6 +233,8 @@ void setup() {
 void loop() {
   unsigned long now = millis(); // Obtiene el tiempo actual
   bool tbconnected = false;
+  float bme280Temperature = NAN;
+  float bme280Humidity = NAN;
 
   if (WiFi.status() == WL_CONNECTED) {
     if (!tb.connected()) {
@@ -258,125 +268,268 @@ void loop() {
       mtime = now;
 
       if (BH1750_DETECTED){
-      sendTelemetryJson(getBh1750DataJson());
+        sendTelemetryJson(getBh1750DataJson());
+      } else {
+        if (checkBh1750Sensor()) {
+          BH1750_DETECTED = true;
+          mb.enqueueMessage(F("BH1750 sensor started"), F("INFO"));
+          sendTelemetryJson(getBh1750DataJson());
+        }
       }
 
       if (BME280_DETECTED){
-        sendTelemetryJson(getBme280DataJson());
+        JsonDocument jsonBme280 = getBme280DataJson();
+        sendTelemetryJson(jsonBme280);
+        bme280Temperature = jsonBme280["temperature"];
+        bme280Humidity = jsonBme280["humidity"];
+      } else {
+        if (checkBme280Sensor()) {
+          BME280_DETECTED = true;
+          mb.enqueueMessage(F("BME280 sensor started"), F("INFO"));
+          JsonDocument jsonBme280 = getBme280DataJson();
+          sendTelemetryJson(jsonBme280);
+          bme280Temperature = jsonBme280["temperature"];
+          bme280Humidity = jsonBme280["humidity"];
+        }
       }
 
       if (DS18B20_DETECTED) {
         sendTelemetryJson(getDs18b20DataJson());
+      } else {
+        if (checkDs18b20Sensor()) {
+          DS18B20_DETECTED = true;
+          mb.enqueueMessage(F("DS18B20 sensor started"), F("INFO"));
+          sendTelemetryJson(getDs18b20DataJson());
+        }
       }
 
       if (MQ_DETECTED){
-        sendTelemetryJson(getMqDataJson());
+        if (isnan(bme280Temperature) || isnan(bme280Humidity)){
+          sendTelemetryJson(getMqDataJson());
+        } else {
+          sendTelemetryJson(getMqDataJson(bme280Temperature, bme280Humidity));
+        }
+      } else {
+        if (checkMqSensor()) {
+          MQ_DETECTED = true;
+          mb.enqueueMessage(F("MQ135 sensor started"), F("INFO"));
+          sendTelemetryJson(getMqDataJson(bme280Temperature, bme280Humidity));
+        }
       }
     }
   }
   tb.loop();
 }
 
-void setupBh1750Sensor(){
- // Initialize the I2C bus (BH1750 library doesn't do this automatically)
-  Wire.begin();
-  // On esp8266 you can select SCL and SDA pins using Wire.begin(D4, D3);
-  // For Wemos / Lolin D1 Mini Pro and the Ambient Light shield use Wire.begin(D2, D1);
-  BH1750_DETECTED = luxMeter.begin();
-  if(BH1750_DETECTED) {
-    mb.enqueueMessage("BH1750 Test begin", "INFO");
-  } else {
-    mb.enqueueMessage("BH1750 not found or damage", "ERROR");
+void reportBh1750Status(const char* currentStatus) {
+  static char lastStatus[32] = "";
+  if (strcmp(lastStatus, currentStatus) != 0) {
+    strncpy(lastStatus, currentStatus, sizeof(lastStatus) - 1);
+    tb.sendAttributeData("bh1750Status", currentStatus);
+    mb.enqueueMessagef("INFO", "BH1750 status: %s", currentStatus);
   }
+}
+
+const char* evaluateBh1750Health(float lux, bool isInitialized) {
+  if (!isInitialized) {
+    return "ERROR_NOT_FOUND";
+  }
+  if (isnan(lux) || lux < 0.0) {
+    return "ERROR_READING_FAILED";
+  }
+  return "OK";
+}
+
+bool checkBh1750Sensor() {
+  Wire.begin();
+  bool initSuccess = luxMeter.begin();
+  
+  if (!initSuccess) {
+    reportBh1750Status("ERROR_NOT_FOUND");
+    return false;
+  }
+
+  float lux = luxMeter.readLightLevel();
+  const char* health = evaluateBh1750Health(lux, true);
+  reportBh1750Status(health);
+
+  return (strcmp(health, "OK") == 0);
+}
+
+void setupBh1750Sensor(){
+  Wire.begin();
+  BH1750_DETECTED = false;
+  mb.enqueueMessage(F("BH1750 sensor started"), F("INFO"));
+}
+
+void reportMqStatus(const char* currentStatus) {
+  static char lastStatus[32] = "";
+  if (strcmp(lastStatus, currentStatus) != 0) {
+    strncpy(lastStatus, currentStatus, sizeof(lastStatus) - 1);
+    tb.sendAttributeData("mqStatus", currentStatus);
+    mb.enqueueMessagef("INFO", "MQ135 status: %s", currentStatus);
+  }
+}
+
+const char* evaluateMqHealth(float co2Ppm, int rawAdc, float calcR0) {
+  if (isinf(calcR0) || isnan(co2Ppm) || isinf(co2Ppm)) {
+    return "ERROR_OPEN_CIRCUIT";
+  }
+  if (calcR0 <= 0.0f || rawAdc <= 10 || co2Ppm <= 0.0) {
+    return "ERROR_ZERO_READING";
+  }
+  if (rawAdc >= 1015 || co2Ppm >= 10000.0) {
+    return "ERROR_OUT_OF_RANGE_HIGH";
+  }
+  return "OK";
+}
+
+bool checkMqSensor() {
+  float calcR0 = config.mqR0Value;
+  if (calcR0 <= 0.0f) {
+    calcR0 = mqSensorCalibration();
+  }
+
+  MQ135.setR0(calcR0);
+  MQ135.update();
+  int rawAdc = analogRead(MQ_ANALOG_PIN);
+  MQ135.setA(110.47); MQ135.setB(-2.862);
+  float co2Ppm = MQ135.readSensor();
+
+  const char* health = evaluateMqHealth(co2Ppm, rawAdc, calcR0);
+  reportMqStatus(health);
+
+  bool isHardwarePresent = (strcmp(health, "ERROR_OPEN_CIRCUIT") != 0 &&
+                            strcmp(health, "ERROR_ZERO_READING") != 0);
+
+  return isHardwarePresent;
 }
 
 void setupMqSensor(){
   if(MQ_DATA_DELETE){
-    mb.deleteFileData(MQ_DATA_FILE);
+    config.mqR0Value = 0.0f;
+    mb.saveStruct(CONFIG_BIN_FILE, config);
   }
-  float calcR0 = 0;
-  //Set math model to calculate the PPM concentration and the value of constants
   MQ135.setRegressionMethod(1); //_PPM =  a*ratio^b
   MQ135.init();
   MQ135.setRL(2); //If the RL value is different from 10K, assign new RL value
 
-  JsonDocument json;
-  json = mb.loadData(MQ_DATA_FILE);
-  
-  if (!json["ERROR"]){
-  //if (json.containsKey("R0_VALUE")){
-    calcR0 = json["R0_VALUE"];
-    mb.enqueueMessage("MQ load config calibration R0 = " + String(calcR0), "INFO");
-  } else {
-    calcR0 = mqSensorCalibration();
-    mb.enqueueMessage("MQ sensor calibration using R0 = " + String(calcR0), "INFO");
-  }
-
-  if(isinf(calcR0)) {
-    mb.enqueueMessage("R0 is infinite (Open circuit detected)", "ERROR");
-    MQ_DETECTED = false;
-    while(1);
-  } else if(calcR0 == 0){
-    mb.enqueueMessage("R0 is zero (Analog pin shorts to ground)", "ERROR");
-    MQ_DETECTED = false;
-    while(1);
-  } else {
-    MQ135.setR0(calcR0);
-    mb.enqueueMessage("MQ135 sensor started", "INFO");
-    MQ_DETECTED = true;
-  }
+  MQ_DETECTED = false;
+  mb.enqueueMessage(F("MQ135 sensor started"), F("INFO"));
 }
 
 float mqSensorCalibration(){
 /*****************************  MQ CAlibration ********************************************/ 
-  // Explanation: 
-  // In this routine the sensor will measure the resistance of the sensor supposedly before being pre-heated
-  // and on clean air (Calibration conditions), setting up R0 value.
-  // We recomend executing this routine only on setup in laboratory conditions.
-  // This routine does not need to be executed on each restart, you can load your R0 value from eeprom.
-  // Acknowledgements: https://jayconsystems.com/blog/understanding-a-gas-sensor
   mb.enqueueMessage(F("MQ135 sensor is being Calibrating, please wait"), F("INFO"));
+  float ratioCleanAir = (config.mqCleanAirRatio > 0.0f) ? config.mqCleanAirRatio : 3.6f;
   float calcR0 = 0;
-  for(int i = 1; i<=10; i ++)
+  for(int i = 1; i <= 10; i++)
   {
     MQ135.update(); // Update data, the arduino will read the voltage from the analog pin
-    calcR0 += MQ135.calibrate(RatioMQ135CleanAir);
+    calcR0 += MQ135.calibrate(ratioCleanAir);
   }
-  calcR0 = calcR0/10;
+  calcR0 = calcR0 / 10.0f;
   
-  JsonDocument json;
-  json["R0_VALUE"] = calcR0;
-  mb.saveData(json, MQ_DATA_FILE);
+  config.mqR0Value = calcR0;
+  mb.saveStruct(CONFIG_BIN_FILE, config);
   /*****************************  MQ CAlibration ********************************************/ 
   return calcR0;
 }
 
-void setupBme280Sensor(){
-  BME280_DETECTED = bme.begin(0x76);
-  if (!BME280_DETECTED) {
-    mb.enqueueMessage("Could not find a valid BME280 sensor!", "ERROR");
-  } else {
-    mb.enqueueMessage("BME280 sensor started", "INFO");
+void reportBme280Status(const char* currentStatus) {
+  static char lastStatus[32] = "";
+  if (strcmp(lastStatus, currentStatus) != 0) {
+    strncpy(lastStatus, currentStatus, sizeof(lastStatus) - 1);
+    tb.sendAttributeData("bme280Status", currentStatus);
+    mb.enqueueMessagef("INFO", "BME280 status: %s", currentStatus);
   }
+}
+
+const char* evaluateBme280Health(float temp, float hum, float press, bool isInitialized) {
+  if (!isInitialized) {
+    return "ERROR_NOT_FOUND";
+  }
+  if (isnan(temp) || isnan(hum) || isnan(press)) {
+    return "ERROR_READING_FAILED";
+  }
+  return "OK";
+}
+
+bool checkBme280Sensor() {
+  Wire.begin();
+  bool initSuccess = bme.begin(0x76);
+  
+  if (!initSuccess) {
+    reportBme280Status("ERROR_NOT_FOUND");
+    return false;
+  }
+
+  float t = bme.readTemperature();
+  float h = bme.readHumidity();
+  float p = bme.readPressure() / 100.0F;
+
+  const char* health = evaluateBme280Health(t, h, p, true);
+  reportBme280Status(health);
+
+  return (strcmp(health, "OK") == 0);
+}
+
+void setupBme280Sensor(){
+  Wire.begin();
+  BME280_DETECTED = false;
+  mb.enqueueMessage(F("BME280 sensor started"), F("INFO"));
+}
+
+void reportDs18b20Status(const char* currentStatus) {
+  static char lastStatus[32] = "";
+  if (strcmp(lastStatus, currentStatus) != 0) {
+    strncpy(lastStatus, currentStatus, sizeof(lastStatus) - 1);
+    tb.sendAttributeData("ds18b20Status", currentStatus);
+    mb.enqueueMessagef("INFO", "DS18B20 status: %s", currentStatus);
+  }
+}
+
+const char* evaluateDs18b20Health(int deviceCount, int validReadingsCount) {
+  if (deviceCount <= 0) {
+    return "ERROR_NOT_FOUND";
+  }
+  if (validReadingsCount <= 0) {
+    return "ERROR_READING_FAILED";
+  }
+  return "OK";
+}
+
+bool checkDs18b20Sensor() {
+  sensors.begin();
+  numberOfDevices = sensors.getDeviceCount();
+  
+  if (numberOfDevices <= 0) {
+    reportDs18b20Status("ERROR_NOT_FOUND");
+    return false;
+  }
+
+  sensors.requestTemperatures();
+  int validCount = 0;
+
+  for (int i = 0; i < numberOfDevices; i++) {
+    if (sensors.getAddress(tempDeviceAddress, i)) {
+      float temp = sensors.getTempC(tempDeviceAddress);
+      if (!isnan(temp) && temp > DEVICE_DISCONNECTED_C) {
+        validCount++;
+      }
+    }
+  }
+
+  const char* health = evaluateDs18b20Health(numberOfDevices, validCount);
+  reportDs18b20Status(health);
+
+  return (strcmp(health, "OK") == 0);
 }
 
 void setupDs18b20Sensor() {
   sensors.begin();
-  numberOfDevices = sensors.getDeviceCount();
-  DS18B20_DETECTED = (numberOfDevices > 0);
-
-  if (DS18B20_DETECTED) {
-    mb.enqueueMessage("DS18B20: " + String(numberOfDevices) + " dispositivo(s) detectado(s)", "INFO");
-    for (int i = 0; i < numberOfDevices; i++) {
-      if (sensors.getAddress(tempDeviceAddress, i)) {
-        mb.enqueueMessage("DS18B20 device " + String(i) + " OK", "INFO");
-      } else {
-        mb.enqueueMessage("DS18B20 device " + String(i) + " sin dirección. Revisar cableado.", "WARN");
-      }
-    }
-  } else {
-    mb.enqueueMessage("DS18B20 no detectado", "WARN");
-  }
+  DS18B20_DETECTED = false;
+  mb.enqueueMessage(F("DS18B20 sensor started"), F("INFO"));
 }
 
 void  setupRelay() {
@@ -401,38 +554,72 @@ void sendTelemetryJson(const JsonDocument &data){
 }
 
 JsonDocument getBh1750DataJson(){
+  float lux = luxMeter.readLightLevel();
+  const char* healthStatus = evaluateBh1750Health(lux, true);
+
+  if (strcmp(healthStatus, "OK") != 0) {
+    mb.enqueueMessagef("ERROR", "Fallo de hardware en BH1750 detectado: %s", healthStatus);
+    BH1750_DETECTED = false;
+  }
+  reportBh1750Status(healthStatus);
+
   JsonDocument json;
-  json["lux"] = luxMeter.readLightLevel();
+  json["lux"] = lux;
   return json;
 }
 
-JsonDocument getMqDataJson(){
+JsonDocument getMqDataJson(float temperature, float humidity){
   MQ135.update(); // Update data, the arduino will read the voltage from the analog pin
+  int rawAdc = analogRead(MQ_ANALOG_PIN);
+
+  float co2Ppm = isnan(temperature) || isnan(humidity) 
+    ? (MQ135.setA(110.47), MQ135.setB(-2.862), MQ135.readSensor()) 
+    : (MQ135.setA(110.47), MQ135.setB(-2.862), MQ135.readSensor(false, mqCorrectionFactor(temperature, humidity)));
+
+  float calcR0 = MQ135.getR0();
+  const char* healthStatus = evaluateMqHealth(co2Ppm, rawAdc, calcR0);
+
+  bool isHardwareFault = (strcmp(healthStatus, "ERROR_OPEN_CIRCUIT") == 0 ||
+                          strcmp(healthStatus, "ERROR_ZERO_READING") == 0 ||
+                          strcmp(healthStatus, "ERROR_R0_OUT_OF_BOUNDS") == 0);
+
+  if (isHardwareFault) {
+    mb.enqueueMessagef("ERROR", "Fallo de hardware en MQ135 detectado: %s", healthStatus);
+    MQ_DETECTED = false;
+  }
+  reportMqStatus(healthStatus);
+
   JsonDocument json;
-    MQ135.setA(605.18); MQ135.setB(-3.937); // Configure the equation to calculate CO concentration value
+  MQ135.setA(605.18); MQ135.setB(-3.937);
   json["co"]      = MQ135.readSensor();
-    MQ135.setA(110.47); MQ135.setB(-2.862); // Configure the equation to calculate CO2 concentration value
-  json["co2"]     = MQ135.readSensor();
-    MQ135.setA(77.255); MQ135.setB(-3.18); //Configure the equation to calculate Alcohol concentration value
+  json["co2"]     = co2Ppm;
+  MQ135.setA(77.255); MQ135.setB(-3.18);
   json["alcohol"] = MQ135.readSensor();
-    MQ135.setA(44.947); MQ135.setB(-3.445); // Configure the equation to calculate Toluen concentration value
+  MQ135.setA(44.947); MQ135.setB(-3.445);
   json["toluen"]  = MQ135.readSensor();
-    MQ135.setA(102.2 ); MQ135.setB(-2.473); // Configure the equation to calculate NH4 concentration value
+  MQ135.setA(102.2 ); MQ135.setB(-2.473);
   json["nh4"]     = MQ135.readSensor();
-    MQ135.setA(34.668); MQ135.setB(-3.369); // Configure the equation to calculate Aceton concentration value
+  MQ135.setA(34.668); MQ135.setB(-3.369);
   json["aceton"]  = MQ135.readSensor();
 
   return json;
-  /*
-    Exponential regression:
-  GAS      | a      | b
-  CO       | 605.18 | -3.937  
-  Alcohol  | 77.255 | -3.18 
-  CO2      | 110.47 | -2.862
-  Toluen   | 44.947 | -3.445
-  NH4      | 102.2  | -2.473
-  Aceton   | 34.668 | -3.369
-  */
+}
+
+/// @brief Calcula el factor de corrección por temperatura y humedad para el sensor MQ-135.
+/// @param temp Temperatura actual en °C (obtenida del BME280).
+/// @param hum Humedad relativa actual en % (obtenida del BME280).
+/// @return Factor multiplicador/aditivo de corrección para RS/R0.
+float mqCorrectionFactor(float temp, float hum) {
+  const float CORA = 0.00035;
+  const float CORB = 0.02718;
+  const float CORC = 1.39538;
+  const float CORD = 0.0018;
+  // Cálculo del factor de corrección ambiental
+  float factor = CORA * temp * temp - CORB * temp + CORC - (hum - 33.0) * CORD;
+  
+  // Protección para evitar factores extremos o negativos
+//  if (factor < 0.1) factor = 0.1;
+  return factor;
 }
 
 JsonDocument getBme280DataJson(){
@@ -460,22 +647,32 @@ JsonDocument getDs18b20DataJson(){
   JsonDocument json;
   sensors.requestTemperatures(); 
 
-  for(int i=0; i<numberOfDevices; i++) {
+  int validCount = 0;
+
+  for(int i = 0; i < numberOfDevices; i++) {
     if(sensors.getAddress(tempDeviceAddress, i)){
       float temp = sensors.getTempC(tempDeviceAddress);
-      if (isnan(temp)) {
-        Serial.println("Failed to read from DS18B20 sensor!");
-      } else {
+      if (!isnan(temp) && temp > DEVICE_DISCONNECTED_C) {
         json[tempDeviceAddress] = temp;
+        validCount++;
       }
     }   
   }
+
+  const char* healthStatus = evaluateDs18b20Health(numberOfDevices, validCount);
+
+  if (strcmp(healthStatus, "OK") != 0) {
+    mb.enqueueMessagef("ERROR", "Fallo de hardware en DS18B20 detectado: %s", healthStatus);
+    DS18B20_DETECTED = false;
+  }
+  reportDs18b20Status(healthStatus);
+
   return json;
 }
 
 /************* RPC callbacks *************/
 void rpcSubscribe(){
- mb.enqueueMessage("Subscribing for RPC", "INFO");
+ mb.enqueueMessage(F("Subscribing for RPC"), F("INFO"));
 
   const std::array<RPC_Callback, 3U> callbacks = {
     RPC_Callback{ RPC_SET_HOURS_OF_LIGHT,     processSetTimeAlarms},
@@ -487,12 +684,12 @@ void rpcSubscribe(){
   // processTemperatureChange() and processSwitchChange() functions,
   // as denoted by callbacks array.
   if (!rpc.RPC_Subscribe(callbacks.cbegin(), callbacks.cend())) {
-    mb.enqueueMessage("Failed to subscribe for RPC", "ERROR");
+    mb.enqueueMessage(F("Failed to subscribe for RPC"), F("ERROR"));
     return;
   }
-  mb.enqueueMessage("Subscribe done", "INFO");
+  mb.enqueueMessage(F("Subscribe done"), F("INFO"));
   
-  mb.enqueueMessage("OTA Firwmare Update Subscription...", "INFO");
+  mb.enqueueMessage(F("OTA Firwmare Update Subscription..."), F("INFO"));
   const OTA_Update_Callback callback(CURRENT_FIRMWARE_TITLE, CURRENT_FIRMWARE_VERSION, &updater, &finished_callback, &progress_callback, &update_starting_callback, FIRMWARE_FAILURE_RETRIES, FIRMWARE_PACKET_SIZE);
   updateRequestSent = ota.Subscribe_Firmware_Update(callback);
 
@@ -505,7 +702,7 @@ void rpcSubscribe(){
 /// @param data Data containing the rpc data that was called and its current value
 /// @return Response that should be sent to the cloud. Useful for getMethods
 void processSetTimeAlarms(const JsonVariantConst &data, JsonDocument &response) {
-  mb.enqueueMessage("Received RPC call SetTimeAlarms", "RCP");
+  mb.enqueueMessage(F("Received RPC call SetTimeAlarms"), F("RCP"));
 
   // Process data
   //Lights on time
@@ -529,28 +726,22 @@ void processSetTimeAlarms(const JsonVariantConst &data, JsonDocument &response) 
 /// @param data Data containing the rpc data that was called and its current value
 /// @return Response that should be sent to the cloud. Useful for getMethods
 void processTimeToSendTelemetry(const JsonVariantConst &data, JsonDocument &response) {
-  mb.enqueueMessage("Received timeToSendTelemetry method", "RCP");
+  mb.enqueueMessage(F("Received timeToSendTelemetry method"), F("RPC"));
   TIME_TO_SEND_TELEMETRY = data["TIME_TO_SEND_TELEMETRY"];
 
-  JsonDocument json;
-  json = mb.loadData(WM_DATA_FILE);
+  config.timeToSendTelemetry = TIME_TO_SEND_TELEMETRY;
+  mb.saveStruct(CONFIG_BIN_FILE, config);
+  tb.sendAttributeData("TimeToSendTelemetry", TIME_TO_SEND_TELEMETRY);
 
-  if (!json["ERROR"]){
-    json["TIME_TO_SEND_TELEMETRY"] = TIME_TO_SEND_TELEMETRY;
-    tb.sendAttributeData("TimeToSendTelemetry", TIME_TO_SEND_TELEMETRY);
-  }
-
-  mb.saveData(json, WM_DATA_FILE);
-
-  mb.enqueueMessage("Send telemetry every " + String(TIME_TO_SEND_TELEMETRY) + " seconds", "RCP");
-  response.set(42);
+  mb.enqueueMessagef("RPC", "Send telemetry every %lu seconds", TIME_TO_SEND_TELEMETRY);
+  response.set(TIME_TO_SEND_TELEMETRY);
 }
 
 /// @brief Callback para atender la llamada RPC "setRelay" enviada desde ThingsBoard Rule Engine al cambiar el umbral de CO2.
 /// @param data Contiene el parámetro boolean (true/false) enviado por el servidor.
 /// @param response Respuesta enviada de vuelta al servidor ThingsBoard.
 void processSetRelay(const JsonVariantConst &data, JsonDocument &response) {
-  mb.enqueueMessage("Received RPC call setRelay", "RPC");
+  mb.enqueueMessage(F("Received RPC call setRelay"), F("RPC"));
 
   if (data == "on") {
     fanOn();
@@ -592,11 +783,11 @@ void finished_callback(const bool & success) {
   if (success) {
     Serial.println("Done, Reboot now");
     ESP.restart();
-    mb.enqueueMessage("Downloading firmware success", "OTA");
+    mb.enqueueMessage(F("Downloading firmware success"), F("OTA"));
 
     return;
   }
-  mb.enqueueMessage("Downloading firmware failed", "OTA");
+  mb.enqueueMessage(F("Downloading firmware failed"), F("OTA"));
   Serial.println();
 }
 
@@ -611,6 +802,26 @@ void progress_callback(const size_t & current, const size_t & total) {
 
 /************* End OTA *************/
 
+void initSystemConfig() {
+  if (!mb.loadStruct(CONFIG_BIN_FILE, config) || config.magic != 0x4D42494E) {
+    mb.enqueueMessage(F("Configuración binaria no encontrada. Inicializando defaults..."), F("WARN"));
+    config.magic = 0x4D42494E;
+    strncpy(config.server, "materbox.io", sizeof(config.server) - 1);
+    strncpy(config.token, "TEST_TOKEN", sizeof(config.token) - 1);
+    config.timeToSendTelemetry = 30;
+    config.lOnHour = 6;   config.lOnMin = 0;  config.lOnSec = 0;
+    config.lOffHour = 18; config.lOffMin = 0; config.lOffSec = 0;
+    config.mqR0Value = 0.0f;
+    config.mqCleanAirRatio = 3.6f;
+    mb.saveStruct(CONFIG_BIN_FILE, config);
+  }
+
+  // Cargar parámetros binarios guardados en las variables de conexión
+  strncpy(THINGSBOARD_SERVER, config.server, sizeof(THINGSBOARD_SERVER) - 1);
+  strncpy(TOKEN, config.token, sizeof(TOKEN) - 1);
+  TIME_TO_SEND_TELEMETRY = config.timeToSendTelemetry;
+}
+
 /************* Wifi Manager *************/
 void setupWifiManager(bool DRD_DETECTED){
   // get device id from macAddress
@@ -624,24 +835,12 @@ void setupWifiManager(bool DRD_DETECTED){
 
   //reset settings - for testing
   if (RESET_SETTINGS){
-    mb.deleteFileData(WM_DATA_FILE);
+    mb.deleteFileData(CONFIG_BIN_FILE);
     wm.resetSettings();
     wm.erase();
   }
 
-  JsonDocument json;
-  json = mb.loadData(WM_DATA_FILE);
-  
-  if (!json["ERROR"]){
-    strcpy(THINGSBOARD_SERVER, json["THINGSBOARD_SERVER"]);
-    //strcpy(THINGSBOARD_PORT, json["THINGSBOARD_PORT"]);
-    strcpy(TOKEN, json["TOKEN"]);
-    STAND_ALONE = json["STAND_ALONE"];
-    TIME_TO_SEND_TELEMETRY = json["TIME_TO_SEND_TELEMETRY"];
-  }
-
   WiFiManagerParameter custom_server("server", "MaterBox server", THINGSBOARD_SERVER, 40);
-  //WiFiManagerParameter custom_mqtt_port("port", "port", THINGSBOARD_PORT, 6);
   WiFiManagerParameter custom_api_token("apikey", "Token", TOKEN, 32);
   WiFiManagerParameter device_type("devicetype", "Tipo", deviceName, 40, " readonly");
   WiFiManagerParameter device_id("deviceid", "Device Id", deviceid, 40, " readonly");
@@ -654,7 +853,6 @@ void setupWifiManager(bool DRD_DETECTED){
   
   // add all your parameters here
   wm.addParameter(&custom_server);
-  //  wm.addParameter(&custom_mqtt_port);
   wm.addParameter(&custom_api_token);
   wm.addParameter(&device_type);
   wm.addParameter(&device_id);
@@ -669,7 +867,6 @@ void setupWifiManager(bool DRD_DETECTED){
 
   // set Hostname
   wm.setHostname(("WM_" + wm.getDefaultAPName()).c_str());
-  // wm.setHostname("WM_RANDO_1234");
 
   // show password publicly in form
   wm.setShowPassword(true);
@@ -680,25 +877,21 @@ void setupWifiManager(bool DRD_DETECTED){
 
   //sets timeout until configuration portal gets turned off
   wm.setConfigPortalTimeout(180);
-  
-  // This is sometimes necessary, it is still unknown when and why this is needed
-  // but it may solve some race condition or bug in esp SDK/lib
-  // wm.setCleanConnect(true); // disconnect before connect, clean connect
   wm.setBreakAfterConfig(true); // needed to use saveWifiCallback
 
   if(DRD_DETECTED || TEST_CP){
     Alarm.delay(1000);
     if(!wm.startConfigPortal("MaterBox IoT", "123456789")){
-      mb.enqueueMessage("Failed to connect and hit timeout", "INFO");
+      mb.enqueueMessage(F("Failed to connect and hit timeout"), F("INFO"));
     } else {
-      mb.enqueueMessage("Wifi connected :)", "INFO");
+      mb.enqueueMessage(F("Wifi connected :)"), F("INFO"));
       wifiInfo();
     }
   } else {
     if(!wm.autoConnect("MaterBox IoT", "123456789")){
-      mb.enqueueMessage("Failed to connect and hit timeout", "INFO");
+      mb.enqueueMessage(F("Failed to connect and hit timeout"), F("INFO"));
     } else {
-      mb.enqueueMessage("Wifi connected :)", "INFO");
+      mb.enqueueMessage(F("Wifi connected :)"), F("INFO"));
       wifiInfo();
     }
   }
@@ -706,30 +899,26 @@ void setupWifiManager(bool DRD_DETECTED){
   //read updated parameters
   strcpy(THINGSBOARD_SERVER, custom_server.getValue());
   strcpy(TOKEN, custom_api_token.getValue());
-  //strcpy(THINGSBOARD_PORT, custom_mqtt_port.getValue());
 
   if (SAVE_PARAMS){
-    JsonDocument json;
-    json["THINGSBOARD_SERVER"] = THINGSBOARD_SERVER;
-    //json["mqtt_port"] = mqtt_port;
-    json["TOKEN"] = TOKEN;
-    json["STAND_ALONE"] = STAND_ALONE;
-    json["TIME_TO_SEND_TELEMETRY"] = TIME_TO_SEND_TELEMETRY;
-    mb.saveData(json, WM_DATA_FILE);
+    strncpy(config.server, THINGSBOARD_SERVER, sizeof(config.server) - 1);
+    strncpy(config.token, TOKEN, sizeof(config.token) - 1);
+    config.timeToSendTelemetry = TIME_TO_SEND_TELEMETRY;
+    mb.saveStruct(CONFIG_BIN_FILE, config);
   }
 }
 
 void saveWifiCallback(){
-  mb.enqueueMessage("wm save settings Callback fired ", "INFO");
+  mb.enqueueMessage(F("wm save settings Callback fired "), F("INFO"));
 }
 
 //gets called when WiFiManager enters configuration mode
 void configModeCallback (WiFiManager *myWiFiManager) {
-  mb.enqueueMessage("wm config Mode Callback fired", "INFO");
+  mb.enqueueMessage(F("wm config Mode Callback fired"), F("INFO"));
 }
 
 void saveParamCallback(){
-  mb.enqueueMessage("wm save Parameters Callback fired", "INFO");
+  mb.enqueueMessage(F("wm save Parameters Callback fired"), F("INFO"));
   SAVE_PARAMS = true;
 }
 
@@ -740,12 +929,12 @@ void bindServerCallback(){
 
 void handleRoute(){
   wm.server->send(200, "text/plain", "hello from user code");
-  mb.enqueueMessage("wm handle route", "INFO");
+  mb.enqueueMessage(F("wm handle route"), F("INFO"));
 }
 
 void wifiInfo(){
   // can contain gargbage on esp32 if wifi is not ready yet
-  mb.enqueueMessage("Wifi debug data", "INFO");
+  mb.enqueueMessage(F("Wifi debug data"), F("INFO"));
 
   JsonDocument json;
   json["SAVED"] = (String)(wm.getWiFiIsSaved() ? "YES" : "NO");
@@ -769,15 +958,15 @@ void getDeviceId(byte macAddressArray[], unsigned int len, char buffer[]){
 }
 
 void setLocalTime(){
-  mb.enqueueMessage("Request time from server", "RPC");
+  mb.enqueueMessage(F("Request time from server"), F("RPC"));
   
   RPC_Request_Callback callback(RPC_REQUEST_GET_CURRENT_TIME, &processTime, nullptr, REQUEST_TIMEOUT_MICROSECONDS, &requestTimedOut);
 
   // Perform a request of the given RPC method. Optional responses are handled in processTime
   if (!rpc_request.RPC_Request(callback)) {
-    mb.enqueueMessage("Failed to request time from server", "ERROR");
+    mb.enqueueMessage(F("Failed to request time from server"), F("ERROR"));
   } else {
-    mb.enqueueMessage("Request done", "RPC");
+    mb.enqueueMessage(F("Request done"), F("RPC"));
     SET_TIME = false;
   }
 }
@@ -788,7 +977,7 @@ void requestTimedOut() {
 }
 
 void printActualTime(){
-  mb.enqueueMessage("Time: " + String(hour()) + ":" + String(minute()) + ":" + String(second()), "INFO");
+  mb.enqueueMessagef("INFO", "Time: %02d:%02d:%02d", hour(), minute(), second());
 }
 
 void setTimeAlarms(int lOnHour, int lOnMin, int lOnSec, int lOffHour, int lOffMin, int lOffSec){
@@ -796,87 +985,66 @@ void setTimeAlarms(int lOnHour, int lOnMin, int lOnSec, int lOffHour, int lOffMi
     Alarm.free(ALARM_ID_ON);
     Alarm.free(ALARM_ID_OFF);
   }
-  JsonDocument json;
-  if (lOnHour == 30){
-    json = mb.loadData(LIGHTS_CONTROL_DATA_FILE);
-    if (!json["ERROR"]){
-      //Lights on time
-      lOnHour = json["lOnHour"];
-      lOnMin  = json["lOnMin"];
-      lOnSec  = json["lOnSec"];
-      
-      //Lights off time
-      lOffHour= json["lOffHour"];
-      lOffMin = json["lOffMin"];
-      lOffSec = json["lOffSec"];
-      mb.enqueueMessage("Setting alarms from lights control data file", "INFO");
-    } else {
-      //Lights on time
-      lOnHour = 6;
-      lOnMin  = 0;
-      lOnSec  = 0;
-      
-      //Lights off time
-      lOffHour= 14;
-      lOffMin = 0;
-      lOffSec = 0;
-      mb.enqueueMessage("Setting alarms from default values", "INFO");
-    }
-  } else {
-      mb.enqueueMessage("Setting alarms from RPC call", "INFO");
-      //Lights on time
-      json["lOnHour"] = lOnHour;
-      json["lOnMin"] = lOnMin;
-      json["lOnSec"] = lOnSec;
 
-      //Lights off time
-      json["lOffHour"] = lOffHour;
-      json["lOffMin"] = lOffMin;
-      json["lOffSec"] = lOffSec;
-      mb.enqueueMessage("Saving alarms info to ligths control data file", "INFO");
-      mb.saveData(json, LIGHTS_CONTROL_DATA_FILE);
+  if (lOnHour == 30){
+    lOnHour  = config.lOnHour;
+    lOnMin   = config.lOnMin;
+    lOnSec   = config.lOnSec;
+    lOffHour = config.lOffHour;
+    lOffMin  = config.lOffMin;
+    lOffSec  = config.lOffSec;
+    mb.enqueueMessage(F("Setting alarms from system config"), F("INFO"));
+  } else {
+    mb.enqueueMessage(F("Setting alarms from RPC call"), F("INFO"));
+    config.lOnHour  = lOnHour;
+    config.lOnMin   = lOnMin;
+    config.lOnSec   = lOnSec;
+    config.lOffHour = lOffHour;
+    config.lOffMin  = lOffMin;
+    config.lOffSec  = lOffSec;
+    mb.saveStruct(CONFIG_BIN_FILE, config);
   }
   ALARM_ID_ON = Alarm.alarmRepeat(lOnHour, lOnMin, lOnSec, turnLightsOn);
-  mb.enqueueMessage("Encender: " + String(lOnHour) + ":" + String(lOnMin) + ":" + String(lOnSec), "INFO");
+  mb.enqueueMessagef("INFO", "Encender: %02d:%02d:%02d", lOnHour, lOnMin, lOnSec);
 
   ALARM_ID_OFF = Alarm.alarmRepeat(lOffHour, lOffMin, lOffSec, turnLightsOff);
-  mb.enqueueMessage("Apagar: " + String(lOffHour) + ":" + String(lOffMin) + ":" + String(lOffSec), "INFO");
+  mb.enqueueMessagef("INFO", "Apagar: %02d:%02d:%02d", lOffHour, lOffMin, lOffSec);
 
 //  Alarm.timerRepeat(15, Repeats);           // timer for every 15 seconds
   if(ALARM_ID_ON == 255 || ALARM_ID_OFF == 255){
-    mb.enqueueMessage("Alarms not set. Try again", "WARN");
+    mb.enqueueMessage(F("Alarms not set. Try again"), F("WARN"));
     Alarm.free(ALARM_ID_ON);
     Alarm.free(ALARM_ID_OFF);
     ALARMS_ARE_SET = false;
     SET_ALARMS = true;
   } else {
-    mb.enqueueMessage("Alarm ON set. Id: " + String(ALARM_ID_ON), "INFO");
-    mb.enqueueMessage("Alarm OFF set. Id: " + String(ALARM_ID_OFF), "INFO");
+    mb.enqueueMessagef("INFO", "Alarm ON set. Id: %d", ALARM_ID_ON);
+    mb.enqueueMessagef("INFO", "Alarm OFF set. Id: %d", ALARM_ID_OFF);
     ALARMS_ARE_SET = true;
     SET_ALARMS = false;
   }
 }
 
 void turnLightsOn(){
-  mb.enqueueMessage("Triggered turn lights on alarm", "INFO");
+  mb.enqueueMessage(F("Triggered turn lights on alarm"), F("INFO"));
   digitalWrite(Relay3, LOW);
   //tb.sendTelemetryData("lights", 1);
 }
 
 void turnLightsOff(){
-  mb.enqueueMessage("Triggered turn lights off alarm", "INFO");
+  mb.enqueueMessage(F("Triggered turn lights off alarm"), F("INFO"));
   digitalWrite(Relay3, HIGH);
   //tb.sendTelemetryData("lights", 0);
 }
 
 void fanOn(){
-  mb.enqueueMessage("Fan (Relay4): ON", "INFO");
+  mb.enqueueMessage(F("Relay CO2 (Relay4): ENCENDIDO (ON)"), F("INFO"));
   digitalWrite(Relay4, LOW);
   tb.sendAttributeData("fanState", "on");
 }
 
 void fanOff(){
-  mb.enqueueMessage("Fan (Relay4): OFF", "INFO");
+  mb.enqueueMessage(F("Relay CO2 (Relay4): APAGADO (OFF)"), F("INFO"));
   digitalWrite(Relay4, HIGH);
   tb.sendAttributeData("fanState", "off");
 }
