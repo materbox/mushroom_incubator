@@ -198,17 +198,15 @@ void fanOff();
 void setup() {
   Serial.begin(SERIAL_DEBUG_BAUD);
   while (!Serial) ; // wait for Arduino Serial Monitor
-  mb.enqueueMessage("Starting", "INFO");
-  mb.enqueueMessage("Test", "ERROR");
-  mb.enqueueMessage("Test", "WARN");
+  mb.enqueueMessage(F("Starting"), F("INFO"));
 
   drd = new DoubleResetDetector(DRD_TIMEOUT, DRD_ADDRESS);
 
   if (drd->detectDoubleReset()) {
-    mb.enqueueMessage("Double Reset Detected", "INFO");
+    mb.enqueueMessage(F("Double Reset Detected"), F("INFO"));
       DRD_DETECTED = true;
     } else {
-      mb.enqueueMessage("No Double Reset Detected", "INFO");
+      mb.enqueueMessage(F("No Double Reset Detected"), F("INFO"));
       DRD_DETECTED = false;
     }
 
@@ -230,16 +228,16 @@ void loop() {
 
   if (WiFi.status() == WL_CONNECTED) {
     if (!tb.connected()) {
-      mb.enqueueMessage("Connecting to: " + String(THINGSBOARD_SERVER) + " with token " + String(TOKEN), "INFO");
+      mb.enqueueMessagef("INFO", "Connecting to: %s with token %s", THINGSBOARD_SERVER, TOKEN);
       if (!tb.connect(THINGSBOARD_SERVER, TOKEN, THINGSBOARD_PORT)) {
-        mb.enqueueMessage("Failed to connect", "ERROR");
+        mb.enqueueMessage(F("Failed to connect"), F("ERROR"));
         tbconnected = false;
         subscribed = false;
       } else {
-        mb.enqueueMessage("Server connected", "INFO");
+        mb.enqueueMessage(F("Server connected"), F("INFO"));
         tbconnected = true;
         tb.sendAttributeData("TimeToSendTelemetry", TIME_TO_SEND_TELEMETRY);
-        mb.enqueueMessage("Send telemetry every " + String(TIME_TO_SEND_TELEMETRY) + " seconds", "INFO");
+        mb.enqueueMessagef("INFO", "Send telemetry every %lu seconds", TIME_TO_SEND_TELEMETRY);
         fanOff(); // if new, create fanState = off attribute
       }
     } else {
@@ -337,7 +335,7 @@ float mqSensorCalibration(){
   // We recomend executing this routine only on setup in laboratory conditions.
   // This routine does not need to be executed on each restart, you can load your R0 value from eeprom.
   // Acknowledgements: https://jayconsystems.com/blog/understanding-a-gas-sensor
-  mb.enqueueMessage("MQ135 sensor is being Calibrating, please wait", "INFO");
+  mb.enqueueMessage(F("MQ135 sensor is being Calibrating, please wait"), F("INFO"));
   float calcR0 = 0;
   for(int i = 1; i<=10; i ++)
   {
